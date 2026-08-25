@@ -34,3 +34,6 @@ logs/*
 !data/freshwater_risk.db
 !models/rf_model.pkl
 !models/label_encoder.pkl
+!results/shap_values.npy
+!results/shap_input_features.csv
+!results/shap_global_importance.json
