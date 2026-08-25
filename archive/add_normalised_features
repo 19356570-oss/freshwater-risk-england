@@ -1,0 +1,36 @@
+"""
+add_normalised_features.py
+One-off patch: adds spills_per_pipe and hrs_per_pipe to an existing
+feature_matrix.csv without rerunning the slow land cover extraction.
+
+Both are simple divisions of columns already present, so a full
+feature engineering rebuild is unnecessary.
+
+Run once, then continue with:  ./run_pipeline.sh --skip-fe
+"""
+
+import pandas as pd
+import numpy as np
+from config import FEAT_MATRIX
+from db_loader import load_feat_matrix
+
+df = pd.read_csv(FEAT_MATRIX)
+print(f"Loaded {len(df)} rows, {len(df.columns)} columns")
+
+if "spills_per_pipe" in df.columns:
+    print("Normalised columns already present - nothing to do.")
+else:
+    # divide by number of monitored outlets to remove monitor-density bias
+    pipes = df["n_overflows"].replace(0, np.nan)
+    df["spills_per_pipe"] = (df["spill_count"] / pipes).fillna(0)
+    df["hrs_per_pipe"]    = (df["spill_hrs"] / pipes).fillna(0)
+
+    df.to_csv(FEAT_MATRIX, index=False)
+    print(f"Added 2 columns. Now {len(df.columns)} columns.")
+    print()
+    print(df[["spill_count", "n_overflows", "spills_per_pipe",
+              "spill_hrs", "hrs_per_pipe"]].describe().round(2))
+
+# reload into the database so feat_matrix table matches the CSV
+load_feat_matrix(matrix_df=df)
+print("\nDatabase updated.")

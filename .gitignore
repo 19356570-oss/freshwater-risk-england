@@ -1,0 +1,31 @@
+# Virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Data - raw sources are large, downloaded manually per PIPELINE_RUN_ORDER.md
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/*.db
+data/snapshots/*
+!data/snapshots/.gitkeep
+
+# Generated model artifacts - regeneratable via run_pipeline.sh
+models/*.pkl
+!models/.gitkeep
+
+# Generated results - regeneratable
+results/*
+!results/.gitkeep
+
+# Logs
+logs/*
+!logs/.gitkeep
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/settings.json archive/

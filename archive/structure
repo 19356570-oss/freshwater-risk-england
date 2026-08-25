@@ -1,0 +1,8 @@
+src/
+├── config.py              # all constants, paths, thresholds
+├── data_loader.py         # load_fww, load_wfd, load_edm
+├── feature_engineering.py # spatial join, EDM join, land cover, build matrix
+├── model_training.py      # spatial CV, RF, XGBoost, LogReg
+├── model_evaluation.py    # traditional vs ML comparison, ablation, SHAP
+├── database_setup.py      # SQLite setup and queries
+└── inference.py           # live prediction using saved model + POOPy data
