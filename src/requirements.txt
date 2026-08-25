@@ -1,0 +1,5 @@
+streamlit==1.60.0
+pandas
+numpy
+plotly==6.9.0
+pyproj
