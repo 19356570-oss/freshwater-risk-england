@@ -57,7 +57,7 @@ def describe_lc_factor(feat_name, value):
     parts = feat_name.split("_")
     kind = LC_KIND_NAMES.get(parts[1], parts[1])
     radius = parts[-1]
-    if value == 0:
+    if value < 0.5:  # rounds to 0% anyway - "No X" reads more naturally than "0% X"
         return f"No {kind} within {radius}"
     return f"{value:.0f}% {kind} within {radius}"
 
@@ -76,12 +76,31 @@ def describe_level(feat_name, value, percentiles_df):
 @st.cache_data(ttl=300)  # refresh from DB every 5 minutes, not just on restart
 def load_all_data():
     conn = get_conn()
+    # For each fww_id, prefer the most recent LIVE prediction if one exists
+    # (reflects current sewage discharge conditions), otherwise fall back
+    # to the historical prediction. This is what makes the dashboard
+    # genuinely "AI-integrated" - predictions update as new data arrives,
+    # not just a static one-time snapshot.
+    # County is joined in from feat_matrix so every part of the dashboard
+    # (map hover, search, detail panel) can consistently disambiguate
+    # points that share the same site_name, or replace unhelpful generic
+    # names like "Other" with something meaningful.
     preds = pd.read_sql("""
-        SELECT fww_id, site_name, easting, northing, wb_id,
-               predicted_status, prob_moderate, prob_poor
-        FROM predictions
-        WHERE data_source = 'historical'
-        ORDER BY id
+        SELECT p.fww_id, p.site_name, p.easting, p.northing, p.wb_id,
+               p.predicted_status, p.prob_moderate, p.prob_poor,
+               p.data_source, p.predicted_at, f.county
+        FROM predictions p
+        INNER JOIN (
+            SELECT fww_id,
+                   MAX(CASE WHEN data_source = 'live' THEN predicted_at END) as live_time,
+                   MAX(predicted_at) as any_time
+            FROM predictions
+            GROUP BY fww_id
+        ) latest
+        ON p.fww_id = latest.fww_id
+        AND p.predicted_at = COALESCE(latest.live_time, latest.any_time)
+        LEFT JOIN feat_matrix f ON p.fww_id = f.fww_id
+        ORDER BY p.fww_id
     """, conn)
     conn.close()
 
@@ -94,10 +113,28 @@ def load_all_data():
         shap_feats = pd.read_csv(os.path.join(RESULTS_DIR, "shap_input_features.csv"))
         with open(os.path.join(RESULTS_DIR, "shap_global_importance.json")) as f:
             global_imp = json.load(f)
-    except FileNotFoundError:
-        shap_vals, shap_feats, global_imp = None, None, {}
 
-    return preds, shap_vals, shap_feats, global_imp
+        # shap_values.npy has no fww_id column of its own - it was computed
+        # against feat_matrix in that table's row order. We cannot assume
+        # preds (built from the predictions table, which can have several
+        # rows per fww_id from historical+live) has the SAME row order as
+        # feat_matrix - it does not. Build an explicit fww_id -> row lookup
+        # here, once, so every location is matched to its SHAP values by
+        # ID, never by position, regardless of how differently the two
+        # tables happen to be ordered.
+        conn2 = get_conn()
+        fm_ids = pd.read_sql("SELECT fww_id FROM feat_matrix", conn2)["fww_id"]
+        conn2.close()
+        # normalise to string - feat_matrix stores fww_id as text, but
+        # predictions may store it differently. A silent type mismatch
+        # here (e.g. int vs str) makes every single lookup fail, which is
+        # exactly what caused the SHAP/prediction mismatch bug.
+        shap_id_to_pos = {str(fww_id): i for i, fww_id in enumerate(fm_ids)}
+
+    except FileNotFoundError:
+        shap_vals, shap_feats, global_imp, shap_id_to_pos = None, None, {}, {}
+
+    return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos
 
 
 @st.cache_data(ttl=3600)  # percentiles change rarely - hourly is enough
@@ -116,7 +153,7 @@ def load_feature_percentiles():
     })
 
 
-preds, shap_vals, shap_feats, global_imp = load_all_data()
+preds, shap_vals, shap_feats, global_imp, shap_id_to_pos = load_all_data()
 percentiles = load_feature_percentiles()
 
 
@@ -131,22 +168,57 @@ status_filter = st.sidebar.multiselect(
 st.sidebar.caption("Tick or untick to show different ratings on the map.")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Narrow to a region")
-
-if "rbd" in preds.columns:
-    regions = ["All of England"] + sorted(
-        [r for r in preds["rbd"].dropna().unique() if r and r != "Unknown"]
-    )
-else:
-    regions = ["All of England"]
-
-region_filter = st.sidebar.selectbox("River basin", regions, label_visibility="collapsed")
-st.sidebar.caption("River basins are the natural drainage areas used to manage water in England.")
-
-st.sidebar.markdown("---")
 st.sidebar.markdown("### Find a place")
 
-all_site_names = sorted(preds["site_name"].dropna().unique().tolist())
+# Multiple FWW sampling points can share the same site_name (e.g. several
+# "River Windrush" locations along its length, tested on different dates
+# and in different counties). Disambiguate using county and sample date -
+# real, meaningful details a person would naturally use to tell two
+# visits to "the same-named river" apart.
+site_counts = preds["site_name"].value_counts()
+
+# Some FWW volunteers entered a generic placeholder rather than a real
+# name (about 180 rows say just "Other"). Showing that alone is not
+# meaningful to a user, so use the county in its place when possible.
+GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
+
+def clean_site_name(name, county=None):
+    """Return a user-friendly name, falling back to county for generic/placeholder names."""
+    if isinstance(name, str) and name.strip().lower() in GENERIC_SITE_NAMES:
+        if pd.notna(county) and county:
+            return f"Unnamed site, {county}"
+        return "Unnamed site"
+    return name
+
+def make_display_name(row):
+    name = row["site_name"]
+    county = row.get("county")
+    clean_name = clean_site_name(name, county)
+
+    if clean_name != name:
+        return clean_name  # already includes county if relevant
+    if site_counts.get(name, 0) <= 1:
+        return name
+    return f"{name}, {county}" if pd.notna(county) and county else name
+
+# Add a display_name to preds itself so the map hover tooltip shows the
+# EXACT SAME disambiguated label used in search and the detail panel -
+# previously the map showed raw site_name while search/detail showed a
+# cleaned-up name, which looked like a mismatch even when the underlying
+# point selection was correct.
+preds["display_name"] = preds.apply(make_display_name, axis=1)
+
+site_lookup = preds[["fww_id", "display_name"]].drop_duplicates(subset="fww_id")
+site_lookup = site_lookup.rename(columns={"display_name": "display"})
+
+display_to_fww_id = dict(zip(site_lookup["display"], site_lookup["fww_id"]))
+all_site_names = sorted(site_lookup["display"].tolist())
+
+# If a map click just took over the selection, clear the search box before
+# it gets created this run - Streamlit does not allow changing a widget's
+# state after it has already been instantiated, so this must happen first.
+if st.session_state.pop("_clear_search_flag", False):
+    st.session_state["site_search"] = []
 
 search_pick = st.sidebar.multiselect(
     "Search by name",
@@ -156,7 +228,7 @@ search_pick = st.sidebar.multiselect(
     key="site_search",
     placeholder="Type to search...",
 )
-searched_site = search_pick[0] if search_pick else None
+searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
 st.sidebar.markdown("---")
@@ -188,8 +260,6 @@ st.markdown(
 )
 
 filtered = preds[preds["predicted_status"].isin(status_filter)]
-if "rbd" in filtered.columns and region_filter != "All of England":
-    filtered = filtered[filtered["rbd"] == region_filter]
 
 n_good = (preds["predicted_status"] == "Good").sum()
 n_mod  = (preds["predicted_status"] == "Moderate").sum()
@@ -213,33 +283,86 @@ st.markdown("---")
 
 map_col, detail_col = st.columns([3, 2])
 
+# Step 1: apply a fresh search pick immediately (no click involved yet).
+if searched_fww_id is not None and searched_fww_id != st.session_state.get("_last_shown_search_id"):
+    st.session_state["_active_selection"] = ("search", searched_fww_id)
+    st.session_state["_last_shown_search_id"] = searched_fww_id
+
+selection = st.session_state.get("_active_selection")
+selected_fww_id = None
+if selection:
+    if selection[0] in ("search", "click_id"):
+        selected_fww_id = selection[1]
+
 with map_col:
     st.markdown("### Explore the map")
     st.caption("Click any dot to find out why that stretch of water got its rating.")
 
     if filtered.empty:
         st.warning(
-            f"There are no locations with a **{', '.join(status_filter)}** rating "
-            f"in **{region_filter}**. Try a different rating or region in the sidebar."
+            f"There are no locations with a **{', '.join(status_filter)}** rating. "
+            "Try ticking a different rating in the sidebar."
         )
-        map_state = None
     else:
+        # shown is built once, deterministically, and NEVER modified based
+        # on the current selection - point_index from a click must always
+        # mean the same row here, run to run, or clicks resolve to the
+        # wrong location entirely. The selected point is made visible via
+        # a separate highlight overlay below instead, not by injecting it
+        # into this base layer.
         shown = filtered.sample(max_points, random_state=42) if len(filtered) > max_points else filtered
+        shown = shown.reset_index(drop=True)
+
+        map_center = {"lat": 52.8, "lon": -1.6}
+        map_zoom = 5
+        searched_row = None
+
+        if selected_fww_id is not None:
+            match_for_map = preds[preds["fww_id"] == selected_fww_id]
+            if not match_for_map.empty:
+                searched_row = match_for_map.iloc[0]
+                map_center = {"lat": searched_row["lat"], "lon": searched_row["lon"]}
+                map_zoom = 11  # close enough to clearly distinguish the single point
+                # NOTE: deliberately not adding this point to `shown` - see
+                # comment above. It's drawn via the highlight overlay only.
 
         fig = px.scatter_map(
             shown,
             lat="lat", lon="lon",
             color="predicted_status",
             color_discrete_map=COLOURS,
-            hover_name="site_name",
+            hover_name="display_name",  # matches search/detail panel exactly
             hover_data={"predicted_status": True, "lat": False, "lon": False},
-            zoom=5, center={"lat": 52.8, "lon": -1.6},
+            zoom=map_zoom, center=map_center,
             height=520,
             map_style="carto-positron",
             category_orders={"predicted_status": ["Good", "Moderate", "Poor"]},
             labels={"predicted_status": "Water health"},
         )
         fig.update_traces(marker={"size": 7, "opacity": 0.8})
+
+        # draw a highlight ring around the selected point so it stands out
+        # clearly from the surrounding dots, even at a zoomed-out view
+        if searched_row is not None:
+            fig.add_scattermap(
+                lat=[searched_row["lat"]], lon=[searched_row["lon"]],
+                mode="markers",
+                marker={"size": 16, "color": "#222222", "opacity": 0.9},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+            fig.add_scattermap(
+                lat=[searched_row["lat"]], lon=[searched_row["lon"]],
+                mode="markers",
+                marker={
+                    "size": 9,
+                    "color": COLOURS.get(searched_row["predicted_status"], "#888"),
+                },
+                showlegend=False,
+                hovertext=searched_row["display_name"],
+                hoverinfo="text",
+            )
+
         fig.update_layout(
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
             legend={
@@ -255,181 +378,204 @@ with map_col:
 
         st.caption(f"Showing {len(shown):,} of {len(filtered):,} places tested.")
 
-        selected = st.plotly_chart(
+        # Step 2: render the map and capture any click in THIS SAME run -
+        # st.plotly_chart's return value is fresh right now, unlike reading
+        # session_state["riskmap"] which reflects the previous run's state.
+        click_result = st.plotly_chart(
             fig, use_container_width=True, key="riskmap",
             on_select="rerun", selection_mode="points",
         )
 
-        map_state = None
-        if selected and selected.get("selection", {}).get("points"):
-            pt = selected["selection"]["points"][0]
-            clicked_name = pt.get("hovertext")
-            if clicked_name:
-                map_state = {"last_object_clicked_tooltip": f"{clicked_name} | "}
+        click_points = (click_result or {}).get("selection", {}).get("points", [])
+        if click_points:
+            pt = click_points[0]
+            # Use the click's actual lat/lon rather than point_index - at
+            # different zoom levels Plotly's index into the rendered view
+            # was found to sometimes resolve to the wrong row (e.g. one
+            # river's point clicked, a completely different one's data
+            # shown). Coordinates are unambiguous regardless of zoom,
+            # pan, or how many points are currently in view.
+            click_lat, click_lon = pt.get("lat"), pt.get("lon")
+            clicked_fww_id = None
+            if click_lat is not None and click_lon is not None:
+                dist = ((shown["lat"] - click_lat) ** 2 + (shown["lon"] - click_lon) ** 2)
+                nearest_idx = dist.idxmin()
+                clicked_fww_id = shown.loc[nearest_idx, "fww_id"]
 
+            if clicked_fww_id is not None:
+                click_key = f"click:{clicked_fww_id}"
+                if click_key != st.session_state.get("_last_shown_click"):
+                    # A genuinely new click just happened. The map figure
+                    # above was already built and sent to the browser BEFORE
+                    # we could know about this click, so its centre/zoom/
+                    # highlight cannot reflect it - only a fresh run,
+                    # starting from scratch with this selection already
+                    # known, can draw the map correctly centred on it.
+                    st.session_state["_active_selection"] = ("click_id", clicked_fww_id)
+                    st.session_state["_last_shown_click"] = click_key
+                    st.session_state["_last_shown_search_id"] = None
+                    st.session_state["_clear_search_flag"] = True
+                    st.rerun()
 
 with detail_col:
     st.markdown("### About this place")
 
-    clicked = map_state.get("last_object_clicked_tooltip") if map_state else None
+    # selection already resolved before the columns, shared with the map above
+    match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
-    if searched_site:
-        site = searched_site
-    elif clicked:
-        site = clicked.split(" | ")[0]
-    else:
-        site = None
+    if not match.empty:
+        # Look up this point's SHAP row by fww_id, not by position - preds
+        # and feat_matrix are not guaranteed to be in the same row order
+        # (predictions has multiple rows per fww_id from historical+live,
+        # restructured via the latest-per-id join, which reorders things).
+        # Using position here previously showed one location's rating
+        # alongside a COMPLETELY DIFFERENT location's SHAP explanation.
+        pos = shap_id_to_pos.get(str(selected_fww_id))
+        row = match.iloc[0]
+        status = row["predicted_status"]
+        colour = COLOURS.get(status, "#888")
 
-    if site:
-        match = preds[preds["site_name"] == site]
+        st.markdown(f"#### {row['display_name']}")
+        st.markdown(
+            f"<div style='background:{colour}15; border-left:4px solid {colour}; "
+            f"padding:12px 16px; border-radius:4px; margin-bottom:12px;'>"
+            f"<div style='color:{colour}; font-weight:600; font-size:18px;'>{status}</div>"
+            f"<div style='font-size:14px; margin-top:4px;'>{STATUS_MEANING.get(status,'')}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
-        if not match.empty:
-            pos = preds.index.get_loc(match.index[0])
-            row = match.iloc[0]
-            status = row["predicted_status"]
-            colour = COLOURS.get(status, "#888")
-
-            st.markdown(f"#### {row['site_name']}")
-            st.markdown(
-                f"<div style='background:{colour}15; border-left:4px solid {colour}; "
-                f"padding:12px 16px; border-radius:4px; margin-bottom:12px;'>"
-                f"<div style='color:{colour}; font-weight:600; font-size:18px;'>{status}</div>"
-                f"<div style='font-size:14px; margin-top:4px;'>{STATUS_MEANING.get(status,'')}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
+        conf = max(row["prob_poor"], row["prob_moderate"])
+        if conf > 0.75:
+            conf_text = "We're fairly confident about this rating."
+        elif conf > 0.6:
+            conf_text = "We're reasonably confident about this rating."
+        else:
+            conf_text = (
+                "This one's borderline - the water here sits close to the line "
+                "between two ratings, so treat it with some caution."
             )
+        st.caption(conf_text)
 
-            conf = max(row["prob_poor"], row["prob_moderate"])
-            if conf > 0.75:
-                conf_text = "We're fairly confident about this rating."
-            elif conf > 0.6:
-                conf_text = "We're reasonably confident about this rating."
-            else:
-                conf_text = (
-                    "This one's borderline - the water here sits close to the line "
-                    "between two ratings, so treat it with some caution."
-                )
-            st.caption(conf_text)
+        st.markdown("---")
+        st.markdown("**Why did this place get this rating?**")
 
-            st.markdown("---")
-            st.markdown("**Why did this place get this rating?**")
+        if shap_vals is not None and pos is not None and pos < len(shap_vals):
+            vals = shap_vals[pos]
+            names = shap_feats.columns.tolist()
+            fvals = shap_feats.iloc[pos].values
 
-            if shap_vals is not None and pos < len(shap_vals):
-                vals = shap_vals[pos]
-                names = shap_feats.columns.tolist()
-                fvals = shap_feats.iloc[pos].values
+            local = pd.DataFrame({"feat": names, "shap": vals, "val": fvals})
+            local["abs"] = local["shap"].abs()
 
-                local = pd.DataFrame({"feat": names, "shap": vals, "val": fvals})
-                local["abs"] = local["shap"].abs()
+            n_total = len(local)
+            n_bad  = int((local["shap"] > 0).sum())
+            n_good_n = int((local["shap"] < 0).sum())
 
-                n_total = len(local)
-                n_bad  = int((local["shap"] > 0).sum())
-                n_good_n = int((local["shap"] < 0).sum())
-
-                if status == "Poor":
-                    st.caption(
-                        f"**{n_bad} of {n_total}** factors point toward Polluted - "
-                        f"shown below. The remaining {n_total - n_bad} pointed the "
-                        "other way but were outweighed."
-                    )
-                elif status == "Good":
-                    st.caption(
-                        f"**{n_good_n} of {n_total}** factors point toward Healthy - "
-                        f"shown below. The remaining {n_total - n_good_n} pointed the "
-                        "other way but were outweighed."
-                    )
-                else:
-                    st.caption(
-                        f"**{n_bad} of {n_total}** factors point toward Polluted, "
-                        f"**{n_good_n} of {n_total}** point toward Healthy - "
-                        "a genuine balance, shown below."
-                    )
-
-                show_all = st.checkbox("Show all factors, not just the top ones", key="show_all_shap")
-
-                if show_all:
-                    local_display = local.sort_values("abs", ascending=False)
-                    st.caption(f"All {n_total} factors, strongest first:")
-                elif status == "Poor":
-                    local_display = local[local["shap"] > 0].nlargest(5, "abs")
-                    st.caption("The five things that made this place polluted:")
-                elif status == "Good":
-                    local_display = local[local["shap"] < 0].nlargest(5, "abs")
-                    st.caption("The five things that kept this place healthy:")
-                else:
-                    bad  = local[local["shap"] > 0].nlargest(3, "abs")
-                    good = local[local["shap"] < 0].nlargest(3, "abs")
-                    local_display = pd.concat([bad, good])
-                    st.caption(
-                        "This place is a balance of concerning and reassuring "
-                        "factors. Here are the three strongest on each side:"
-                    )
-
-                showing_balanced = (not show_all) and status == "Moderate"
-                last_group = None
-
-                for _, r in local_display.iterrows():
-                    worsens = r["shap"] > 0
-                    icon = "🔴" if worsens else "🔵"
-                    direction_text = (
-                        "pushed this rating toward Polluted" if worsens
-                        else "pushed this rating toward Healthy"
-                    )
-
-                    if showing_balanced:
-                        group = "Concerning factors" if worsens else "Reassuring factors"
-                        if group != last_group:
-                            st.markdown(f"**{group}**")
-                            last_group = group
-
-                    if r["feat"].startswith("lc_"):
-                        label = describe_lc_factor(r["feat"], r["val"])
-                        val_str = ""
-                    else:
-                        label = FEATURE_LABELS.get(r["feat"], r["feat"])
-                        if r["feat"] in ("nitrate_mid", "phosphate_mid"):
-                            val_str = f"{r['val']:.2f} mg/L measured"
-                        elif r["feat"] == "spills_per_pipe":
-                            val_str = f"{r['val']:,.0f} spills per pipe on average"
-                        else:
-                            val_str = f"{r['val']:,.0f}"
-
-                    how_high = describe_level(r["feat"], r["val"], percentiles)
-                    how_high_str = f" ({how_high})" if how_high else ""
-
-                    if val_str:
-                        detail = f"<span style='color:#666; font-size:13px;'>{val_str}{how_high_str}</span>"
-                    elif how_high:
-                        detail = f"<span style='color:#666; font-size:13px;'>{how_high}</span>"
-                    else:
-                        detail = ""
-
-                    st.markdown(
-                        f"{icon} **{label}** - {direction_text}  \n{detail}",
-                        unsafe_allow_html=True,
-                    )
-
-                pull_poor = local[local["shap"] > 0]["shap"].sum()
-                pull_healthy = local[local["shap"] < 0]["shap"].sum()
-
-                st.caption("🔴 pushed toward Polluted · 🔵 pushed toward Healthy")
+            if status == "Poor":
                 st.caption(
-                    f"Total pull toward Polluted: {pull_poor:+.3f} · "
-                    f"Total pull toward Healthy: {pull_healthy:+.3f} "
-                    f"(across all {n_total} factors, not just those shown above). "
-                    "The final rating reflects the sum of every factor, not just "
-                    "the strongest few."
+                    f"**{n_bad} of {n_total}** factors point toward Polluted - "
+                    f"shown below. The remaining {n_total - n_bad} pointed the "
+                    "other way but were outweighed."
                 )
-                st.warning(
-                    "**Reading these carefully.** These show statistical patterns the "
-                    "system found, not proven cause and effect. Sewage monitors are "
-                    "mostly installed in towns and cities, so raw spill numbers alone "
-                    "can be misleading - we correct for this by looking at spills per "
-                    "monitored pipe rather than the total count.",
-                    icon="⚠️",
+            elif status == "Good":
+                st.caption(
+                    f"**{n_good_n} of {n_total}** factors point toward Healthy - "
+                    f"shown below. The remaining {n_total - n_good_n} pointed the "
+                    "other way but were outweighed."
                 )
             else:
-                st.caption("Detailed explanation not available for this location.")
+                st.caption(
+                    f"**{n_bad} of {n_total}** factors point toward Polluted, "
+                    f"**{n_good_n} of {n_total}** point toward Healthy - "
+                    "a genuine balance, shown below."
+                )
+
+            show_all = st.checkbox("Show all factors, not just the top ones", key="show_all_shap")
+
+            if show_all:
+                local_display = local.sort_values("abs", ascending=False)
+                st.caption(f"All {n_total} factors, strongest first:")
+            elif status == "Poor":
+                local_display = local[local["shap"] > 0].nlargest(5, "abs")
+                st.caption("The five things that made this place polluted:")
+            elif status == "Good":
+                local_display = local[local["shap"] < 0].nlargest(5, "abs")
+                st.caption("The five things that kept this place healthy:")
+            else:
+                bad  = local[local["shap"] > 0].nlargest(3, "abs")
+                good = local[local["shap"] < 0].nlargest(3, "abs")
+                local_display = pd.concat([bad, good])
+                st.caption(
+                    "This place is a balance of concerning and reassuring "
+                    "factors. Here are the three strongest on each side:"
+                )
+
+            showing_balanced = (not show_all) and status == "Moderate"
+            last_group = None
+
+            for _, r in local_display.iterrows():
+                worsens = r["shap"] > 0
+                icon = "🔴" if worsens else "🔵"
+                direction_text = (
+                    "pushed this rating toward Polluted" if worsens
+                    else "pushed this rating toward Healthy"
+                )
+
+                if showing_balanced:
+                    group = "Concerning factors" if worsens else "Reassuring factors"
+                    if group != last_group:
+                        st.markdown(f"**{group}**")
+                        last_group = group
+
+                if r["feat"].startswith("lc_"):
+                    label = describe_lc_factor(r["feat"], r["val"])
+                    val_str = ""
+                else:
+                    label = FEATURE_LABELS.get(r["feat"], r["feat"])
+                    if r["feat"] in ("nitrate_mid", "phosphate_mid"):
+                        val_str = f"{r['val']:.2f} mg/L measured"
+                    elif r["feat"] == "spills_per_pipe":
+                        val_str = f"{r['val']:,.0f} spills per pipe on average"
+                    else:
+                        val_str = f"{r['val']:,.0f}"
+
+                how_high = describe_level(r["feat"], r["val"], percentiles)
+                how_high_str = f" ({how_high})" if how_high else ""
+
+                if val_str:
+                    detail = f"<span style='color:#666; font-size:13px;'>{val_str}{how_high_str}</span>"
+                elif how_high:
+                    detail = f"<span style='color:#666; font-size:13px;'>{how_high}</span>"
+                else:
+                    detail = ""
+
+                st.markdown(
+                    f"{icon} **{label}** - {direction_text}  \n{detail}",
+                    unsafe_allow_html=True,
+                )
+
+            pull_poor = local[local["shap"] > 0]["shap"].sum()
+            pull_healthy = local[local["shap"] < 0]["shap"].sum()
+
+            st.caption("🔴 pushed toward Polluted · 🔵 pushed toward Healthy")
+            st.caption(
+                f"Total pull toward Polluted: {pull_poor:+.3f} · "
+                f"Total pull toward Healthy: {pull_healthy:+.3f} "
+                f"(across all {n_total} factors, not just those shown above). "
+                "The final rating reflects the sum of every factor, not just "
+                "the strongest few."
+            )
+            st.warning(
+                "**Reading these carefully.** These show statistical patterns the "
+                "system found, not proven cause and effect. Sewage monitors are "
+                "mostly installed in towns and cities, so raw spill numbers alone "
+                "can be misleading - we correct for this by looking at spills per "
+                "monitored pipe rather than the total count.",
+                icon="⚠️",
+            )
+        else:
+            st.caption("Detailed explanation not available for this location.")
     else:
         st.info("👈 Click a dot on the map, or search for a place, to see what's affecting that stretch of water.")
 
