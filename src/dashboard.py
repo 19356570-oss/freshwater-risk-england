@@ -157,6 +157,10 @@ preds, shap_vals, shap_feats, global_imp, shap_id_to_pos = load_all_data()
 percentiles = load_feature_percentiles()
 
 
+st.sidebar.markdown("# 🌊 RiverWatch")
+st.sidebar.caption("England Freshwater Risk Dashboard")
+st.sidebar.markdown("---")
+
 st.sidebar.markdown("### Show me")
 
 status_filter = st.sidebar.multiselect(
