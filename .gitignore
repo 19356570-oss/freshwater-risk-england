@@ -29,3 +29,8 @@ logs/*
 # OS / editor
 .DS_Store
 .vscode/settings.json archive/
+
+# Exceptions - these specific files ARE needed for Streamlit Cloud deployment
+!data/freshwater_risk.db
+!models/rf_model.pkl
+!models/label_encoder.pkl
