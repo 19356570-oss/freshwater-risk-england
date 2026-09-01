@@ -34,10 +34,17 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install --upgrade pip
+          # upgrade setuptools FIRST - poopy's own installer bundles a
+          # legacy ez_setup.py bootstrap script with Python 2 exception
+          # syntax, which only crashes when pip creates a fresh isolated
+          # build sandbox with an old/absent setuptools. Upgrading first,
+          # then disabling build isolation for poopy specifically, makes
+          # it see a modern setuptools already present and skip that
+          # broken code path entirely.
+          pip install --upgrade pip setuptools wheel
           pip install pandas numpy scipy scikit-learn joblib
           pip install GDAL=="$(gdal-config --version)"
-          pip install poopy
+          pip install --no-build-isolation poopy
 
       - name: Pull live POOPy data and re-predict
         working-directory: .
