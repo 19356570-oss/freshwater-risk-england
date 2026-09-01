@@ -236,10 +236,7 @@ searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
 st.sidebar.markdown("---")
-max_points = st.sidebar.slider(
-    "Number of locations to show", 200, 5000, 1500, step=100,
-    help="Showing fewer locations makes the map load faster."
-)
+max_points = 50000
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### What am I looking at?")
