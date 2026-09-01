@@ -369,14 +369,21 @@ with map_col:
 
         fig.update_layout(
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
+            # Legend colours are pinned explicitly rather than left to
+            # inherit Streamlit's theme. In dark mode, Streamlit passes
+            # Plotly a dark template whose default text is white - but
+            # this legend's background is deliberately always light
+            # (bgcolor below), so inherited white text becomes invisible
+            # against it. Fixing font colour here keeps it readable in
+            # both light and dark mode.
             legend={
                 "yanchor": "bottom", "y": 0.03,
                 "xanchor": "left",   "x": 0.02,
                 "bgcolor": "rgba(255,255,255,0.92)",
                 "bordercolor": "rgba(0,0,0,0.15)",
                 "borderwidth": 1,
-                "title": {"text": "Water health", "font": {"size": 12}},
-                "font": {"size": 12},
+                "title": {"text": "Water health", "font": {"size": 12, "color": "#1A1A1A"}},
+                "font": {"size": 12, "color": "#1A1A1A"},
             },
         )
 
