@@ -34,17 +34,14 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          # upgrade setuptools FIRST - poopy's own installer bundles a
-          # legacy ez_setup.py bootstrap script with Python 2 exception
-          # syntax, which only crashes when pip creates a fresh isolated
-          # build sandbox with an old/absent setuptools. Upgrading first,
-          # then disabling build isolation for poopy specifically, makes
-          # it see a modern setuptools already present and skip that
-          # broken code path entirely.
+          # Install POOPy directly from GitHub, NOT PyPI - the published
+          # PyPI package (poopy 0.2.5) bundles a broken ez_setup.py with
+          # invalid Python 2 syntax that cannot even be parsed under
+          # Python 3. The GitHub source does not have this problem.
           pip install --upgrade pip setuptools wheel
           pip install pandas numpy scipy scikit-learn joblib
           pip install GDAL=="$(gdal-config --version)"
-          pip install --no-build-isolation poopy
+          pip install "git+https://github.com/AlexLipp/POOPy.git@6837ea2c75116703ae9f919917ba6acc07d6569e"
 
       - name: Pull live POOPy data and re-predict
         working-directory: .
