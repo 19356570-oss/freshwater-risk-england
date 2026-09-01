@@ -1,0 +1,55 @@
+name: Live Data Pull
+
+# Runs every 15 minutes, independent of any Codespace being open.
+# Pulls live POOPy sewage discharge data, spatially joins it to
+# waterbodies, re-predicts affected locations, and commits the
+# updated database back to the repo so the deployed Streamlit
+# Cloud app picks up fresh predictions automatically.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:   # lets you trigger a run manually from the Actions tab
+
+jobs:
+  pull-and-predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: Feature
+
+      - name: Install system dependencies (GDAL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgdal-dev gdal-bin
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas numpy scipy scikit-learn joblib
+          pip install GDAL=="$(gdal-config --version)"
+          pip install poopy
+
+      - name: Pull live POOPy data and re-predict
+        working-directory: .
+        run: |
+          PYTHONPATH=src python src/pull_poopy_now.py
+          PYTHONPATH=src python src/live_inference.py
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/freshwater_risk.db
+          git diff --staged --quiet && echo "No changes to commit" || \
+            git commit -m "Automated live data pull $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push origin Feature
