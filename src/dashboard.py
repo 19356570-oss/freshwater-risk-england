@@ -350,27 +350,38 @@ with map_col:
         )
         fig.update_traces(marker={"size": 7, "opacity": 0.8})
 
-        # draw a highlight ring around the selected point so it stands out
-        # clearly from the surrounding dots, even at a zoomed-out view
+        # Highlight traces are ALWAYS added, every render - just empty
+        # when nothing is selected. Earlier versions only added these
+        # traces conditionally (only once something was selected), which
+        # changed the figure's trace count between "nothing selected" and
+        # "something selected" states. That structural change breaks
+        # uirevision's ability to preserve the user's pan/zoom, causing
+        # the map to visibly reset on every click. Keeping trace count
+        # fixed at all times is what actually fixes it.
         if searched_row is not None:
-            fig.add_scattermap(
-                lat=[searched_row["lat"]], lon=[searched_row["lon"]],
-                mode="markers",
-                marker={"size": 16, "color": "#222222", "opacity": 0.9},
-                showlegend=False,
-                hoverinfo="skip",
-            )
-            fig.add_scattermap(
-                lat=[searched_row["lat"]], lon=[searched_row["lon"]],
-                mode="markers",
-                marker={
-                    "size": 9,
-                    "color": COLOURS.get(searched_row["predicted_status"], "#888"),
-                },
-                showlegend=False,
-                hovertext=searched_row["display_name"],
-                hoverinfo="text",
-            )
+            halo_lat, halo_lon = [searched_row["lat"]], [searched_row["lon"]]
+            dot_colour = COLOURS.get(searched_row["predicted_status"], "#888")
+            dot_hover = searched_row["display_name"]
+        else:
+            halo_lat, halo_lon = [], []
+            dot_colour = "#888"
+            dot_hover = ""
+
+        fig.add_scattermap(
+            lat=halo_lat, lon=halo_lon,
+            mode="markers",
+            marker={"size": 16, "color": "#222222", "opacity": 0.9},
+            showlegend=False,
+            hoverinfo="skip",
+        )
+        fig.add_scattermap(
+            lat=halo_lat, lon=halo_lon,
+            mode="markers",
+            marker={"size": 9, "color": dot_colour},
+            showlegend=False,
+            hovertext=dot_hover,
+            hoverinfo="text",
+        )
 
         fig.update_layout(
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
