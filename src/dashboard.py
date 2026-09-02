@@ -57,7 +57,7 @@ def describe_lc_factor(feat_name, value):
     parts = feat_name.split("_")
     kind = LC_KIND_NAMES.get(parts[1], parts[1])
     radius = parts[-1]
-    if value < 0.5:  # rounds to 0% anyway - "No X" reads more naturally than "0% X"
+    if value < 0.5:  # rounds to 0% anyway - "No x" reads more naturally than "0% x"
         return f"No {kind} within {radius}"
     return f"{value:.0f}% {kind} within {radius}"
 
@@ -76,15 +76,6 @@ def describe_level(feat_name, value, percentiles_df):
 @st.cache_data(ttl=300)  # refresh from DB every 5 minutes, not just on restart
 def load_all_data():
     conn = get_conn()
-    # For each fww_id, prefer the most recent LIVE prediction if one exists
-    # (reflects current sewage discharge conditions), otherwise fall back
-    # to the historical prediction. This is what makes the dashboard
-    # genuinely "AI-integrated" - predictions update as new data arrives,
-    # not just a static one-time snapshot.
-    # County is joined in from feat_matrix so every part of the dashboard
-    # (map hover, search, detail panel) can consistently disambiguate
-    # points that share the same site_name, or replace unhelpful generic
-    # names like "Other" with something meaningful.
     preds = pd.read_sql("""
         SELECT p.fww_id, p.site_name, p.easting, p.northing, p.wb_id,
                p.predicted_status, p.prob_moderate, p.prob_poor,
@@ -114,21 +105,9 @@ def load_all_data():
         with open(os.path.join(RESULTS_DIR, "shap_global_importance.json")) as f:
             global_imp = json.load(f)
 
-        # shap_values.npy has no fww_id column of its own - it was computed
-        # against feat_matrix in that table's row order. We cannot assume
-        # preds (built from the predictions table, which can have several
-        # rows per fww_id from historical+live) has the SAME row order as
-        # feat_matrix - it does not. Build an explicit fww_id -> row lookup
-        # here, once, so every location is matched to its SHAP values by
-        # ID, never by position, regardless of how differently the two
-        # tables happen to be ordered.
         conn2 = get_conn()
         fm_ids = pd.read_sql("SELECT fww_id FROM feat_matrix", conn2)["fww_id"]
         conn2.close()
-        # normalise to string - feat_matrix stores fww_id as text, but
-        # predictions may store it differently. A silent type mismatch
-        # here (e.g. int vs str) makes every single lookup fail, which is
-        # exactly what caused the SHAP/prediction mismatch bug.
         shap_id_to_pos = {str(fww_id): i for i, fww_id in enumerate(fm_ids)}
 
     except FileNotFoundError:
@@ -174,16 +153,8 @@ st.sidebar.caption("Tick or untick to show different ratings on the map.")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Find a place")
 
-# Multiple FWW sampling points can share the same site_name (e.g. several
-# "River Windrush" locations along its length, tested on different dates
-# and in different counties). Disambiguate using county and sample date -
-# real, meaningful details a person would naturally use to tell two
-# visits to "the same-named river" apart.
 site_counts = preds["site_name"].value_counts()
 
-# Some FWW volunteers entered a generic placeholder rather than a real
-# name (about 180 rows say just "Other"). Showing that alone is not
-# meaningful to a user, so use the county in its place when possible.
 GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
 
 def clean_site_name(name, county=None):
@@ -200,16 +171,11 @@ def make_display_name(row):
     clean_name = clean_site_name(name, county)
 
     if clean_name != name:
-        return clean_name  # already includes county if relevant
+        return clean_name
     if site_counts.get(name, 0) <= 1:
         return name
     return f"{name}, {county}" if pd.notna(county) and county else name
 
-# Add a display_name to preds itself so the map hover tooltip shows the
-# EXACT SAME disambiguated label used in search and the detail panel -
-# previously the map showed raw site_name while search/detail showed a
-# cleaned-up name, which looked like a mismatch even when the underlying
-# point selection was correct.
 preds["display_name"] = preds.apply(make_display_name, axis=1)
 
 site_lookup = preds[["fww_id", "display_name"]].drop_duplicates(subset="fww_id")
@@ -236,10 +202,7 @@ searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
 st.sidebar.markdown("---")
-# Fixed cap on rendered points for map performance - previously a user
-# slider, removed for a simpler sidebar. 1500 keeps load time fast while
-# still showing a representative spread across England.
-max_points = len(preds)  # no cap - show every real location, not a sample
+max_points = len(preds)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### What am I looking at?")
@@ -288,9 +251,13 @@ st.markdown("---")
 map_col, detail_col = st.columns([3, 2])
 
 # Step 1: apply a fresh search pick immediately (no click involved yet).
+# Search ALWAYS re-centres the map on the found point, regardless of
+# whether the user had manually zoomed in beforehand.
 if searched_fww_id is not None and searched_fww_id != st.session_state.get("_last_shown_search_id"):
     st.session_state["_active_selection"] = ("search", searched_fww_id)
     st.session_state["_last_shown_search_id"] = searched_fww_id
+    st.session_state["_force_recenter"] = True
+    st.session_state["_recenter_source"] = "search"
 
 selection = st.session_state.get("_active_selection")
 selected_fww_id = None
@@ -308,39 +275,79 @@ with map_col:
             "Try ticking a different rating in the sidebar."
         )
     else:
-        # shown is built once, deterministically, and NEVER modified based
-        # on the current selection - point_index from a click must always
-        # mean the same row here, run to run, or clicks resolve to the
-        # wrong location entirely. The selected point is made visible via
-        # a separate highlight overlay below instead, not by injecting it
-        # into this base layer.
         shown = filtered.sample(max_points, random_state=42) if len(filtered) > max_points else filtered
         shown = shown.reset_index(drop=True)
 
-        # Map view is a FIXED default - not tied to selection at all.
-        # Earlier versions re-centred and/or re-zoomed on every click,
-        # which felt "flaky": Streamlit rebuilds the whole figure on
-        # every interaction, so any camera change causes a visible jump
-        # even when the underlying data hasn't moved. Now selecting a
-        # point only adds a highlight marker - the view itself never
-        # moves on its own, only in response to the user's own pan/zoom.
-        map_center = {"lat": 52.8, "lon": -1.6}
-        map_zoom = 5
-        searched_row = None
+        # --- Map view state -------------------------------------------------
+        # The map's center/zoom are persisted in session_state so that a
+        # script rerun (which Streamlit does on every interaction) does NOT
+        # wipe out the view the user has manually panned/zoomed to.
+        #
+        # uirevision is the key: when the figure is rebuilt on a rerun,
+        # Plotly compares the new uirevision to the previous one. If they
+        # match, it keeps the user's current pan/zoom and ignores the
+        # figure's own center/zoom. If they differ, it applies the figure's
+        # center/zoom (i.e. it re-centres on the selected point).
+        #
+        # Behaviour the user wants:
+        #   - Search bar  → ALWAYS zoom to the found point.
+        #   - Map click   → zoom to the point ONLY if the map is still at
+        #                   its default home view; if the user has already
+        #                   zoomed in (manually or via a previous select),
+        #                   just highlight the point without moving.
+        #
+        # We track "at home" ourselves because Streamlit's on_select only
+        # reports point clicks, not pan/zoom relayout events, so we cannot
+        # read the live viewport from the browser. After any recenter the
+        # map is considered "zoomed in"; a Reset button restores home.
+        DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
+        DEFAULT_ZOOM = 5
 
+        if "_map_center" not in st.session_state:
+            st.session_state["_map_center"] = DEFAULT_CENTER
+        if "_map_zoom" not in st.session_state:
+            st.session_state["_map_zoom"] = DEFAULT_ZOOM
+        if "_map_uirevision" not in st.session_state:
+            st.session_state["_map_uirevision"] = "freshwater-risk-map"
+        if "_map_at_home" not in st.session_state:
+            st.session_state["_map_at_home"] = True
+
+        force_recenter = st.session_state.pop("_force_recenter", False)
+        recenter_source = st.session_state.pop("_recenter_source", None)
+
+        searched_row = None
         if selected_fww_id is not None:
             match_for_map = preds[preds["fww_id"] == selected_fww_id]
             if not match_for_map.empty:
                 searched_row = match_for_map.iloc[0]
-                # NOTE: deliberately not adding this point to `shown` - see
-                # comment above. It's drawn via the highlight overlay only.
+
+        # Decide whether to re-centre this run.
+        # Search always re-centres. A click only re-centres if the map is
+        # still at its home view. Sidebar-only reruns never re-centre.
+        should_recenter = False
+        if force_recenter and searched_row is not None:
+            if recenter_source == "search":
+                should_recenter = True
+            elif recenter_source == "click" and st.session_state["_map_at_home"]:
+                should_recenter = True
+
+        if should_recenter:
+            st.session_state["_map_center"] = {"lat": float(searched_row["lat"]),
+                                               "lon": float(searched_row["lon"])}
+            st.session_state["_map_zoom"] = 11
+            st.session_state["_map_at_home"] = False
+            st.session_state["_map_uirevision"] = "freshwater-risk-map-recenter"
+
+        map_center = st.session_state["_map_center"]
+        map_zoom = st.session_state["_map_zoom"]
+        uirevision = st.session_state["_map_uirevision"]
 
         fig = px.scatter_map(
             shown,
             lat="lat", lon="lon",
             color="predicted_status",
             color_discrete_map=COLOURS,
-            hover_name="display_name",  # matches search/detail panel exactly
+            hover_name="display_name",
             hover_data={"predicted_status": True, "lat": False, "lon": False},
             zoom=map_zoom, center=map_center,
             height=520,
@@ -351,13 +358,8 @@ with map_col:
         fig.update_traces(marker={"size": 7, "opacity": 0.8})
 
         # Highlight traces are ALWAYS added, every render - just empty
-        # when nothing is selected. Earlier versions only added these
-        # traces conditionally (only once something was selected), which
-        # changed the figure's trace count between "nothing selected" and
-        # "something selected" states. That structural change breaks
-        # uirevision's ability to preserve the user's pan/zoom, causing
-        # the map to visibly reset on every click. Keeping trace count
-        # fixed at all times is what actually fixes it.
+        # when nothing is selected. Keeping the trace count fixed across
+        # all states is what lets uirevision preserve the user's pan/zoom.
         if searched_row is not None:
             halo_lat, halo_lon = [searched_row["lat"]], [searched_row["lon"]]
             dot_colour = COLOURS.get(searched_row["predicted_status"], "#888")
@@ -385,29 +387,8 @@ with map_col:
 
         fig.update_layout(
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
-            # This is the real fix for the map "flickering"/resetting on
-            # every click. Streamlit reruns the whole script on any
-            # interaction, rebuilding this figure from scratch each time -
-            # normally that means the browser is told to reset to the
-            # hardcoded zoom/center above, wiping out whatever the user
-            # had manually panned/zoomed to. uirevision tells Plotly's
-            # browser widget: if a new figure arrives but this value is
-            # unchanged, keep the user's current view exactly as it is,
-            # ignore the figure's own zoom/center. Must stay the same
-            # constant across every rerun for this to work.
-            uirevision="freshwater-risk-map",
-            # For scatter_map's newer MapLibre-based "map" trace type, the
-            # top-level uirevision above does not always cascade down to
-            # the map's own viewport state reliably. Setting it explicitly
-            # here as well is the more robust fix for that trace type.
-            map={"uirevision": "freshwater-risk-map"},
-            # Legend colours are pinned explicitly rather than left to
-            # inherit Streamlit's theme. In dark mode, Streamlit passes
-            # Plotly a dark template whose default text is white - but
-            # this legend's background is deliberately always light
-            # (bgcolor below), so inherited white text becomes invisible
-            # against it. Fixing font colour here keeps it readable in
-            # both light and dark mode.
+            uirevision=uirevision,
+            map={"uirevision": uirevision},
             legend={
                 "yanchor": "bottom", "y": 0.03,
                 "xanchor": "left",   "x": 0.02,
@@ -421,9 +402,15 @@ with map_col:
 
         st.caption(f"Showing {len(shown):,} of {len(filtered):,} places tested.")
 
-        # Step 2: render the map and capture any click in THIS SAME run -
-        # st.plotly_chart's return value is fresh right now, unlike reading
-        # session_state["riskmap"] which reflects the previous run's state.
+        # Let the user return to the full-country home view after zooming in.
+        if not st.session_state["_map_at_home"]:
+            if st.button("Reset map view", help="Return to the full England view"):
+                st.session_state["_map_center"] = DEFAULT_CENTER
+                st.session_state["_map_zoom"] = DEFAULT_ZOOM
+                st.session_state["_map_at_home"] = True
+                st.session_state["_map_uirevision"] = "freshwater-risk-map-home"
+                st.rerun()
+
         click_result = st.plotly_chart(
             fig, use_container_width=True, key="riskmap",
             on_select="rerun", selection_mode="points",
@@ -432,12 +419,6 @@ with map_col:
         click_points = (click_result or {}).get("selection", {}).get("points", [])
         if click_points:
             pt = click_points[0]
-            # Use the click's actual lat/lon rather than point_index - at
-            # different zoom levels Plotly's index into the rendered view
-            # was found to sometimes resolve to the wrong row (e.g. one
-            # river's point clicked, a completely different one's data
-            # shown). Coordinates are unambiguous regardless of zoom,
-            # pan, or how many points are currently in view.
             click_lat, click_lon = pt.get("lat"), pt.get("lon")
             clicked_fww_id = None
             if click_lat is not None and click_lon is not None:
@@ -451,28 +432,23 @@ with map_col:
                     # A genuinely new click just happened. The map figure
                     # above was already built and sent to the browser BEFORE
                     # we could know about this click, so its centre/zoom/
-                    # highlight cannot reflect it - only a fresh run,
-                    # starting from scratch with this selection already
-                    # known, can draw the map correctly centred on it.
+                    # highlight cannot reflect it - only a fresh run, starting
+                    # from scratch with this selection already known, can draw
+                    # the map correctly centred on it.
                     st.session_state["_active_selection"] = ("click_id", clicked_fww_id)
                     st.session_state["_last_shown_click"] = click_key
                     st.session_state["_last_shown_search_id"] = None
                     st.session_state["_clear_search_flag"] = True
+                    st.session_state["_force_recenter"] = True
+                    st.session_state["_recenter_source"] = "click"
                     st.rerun()
 
 with detail_col:
     st.markdown("### About this place")
 
-    # selection already resolved before the columns, shared with the map above
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
     if not match.empty:
-        # Look up this point's SHAP row by fww_id, not by position - preds
-        # and feat_matrix are not guaranteed to be in the same row order
-        # (predictions has multiple rows per fww_id from historical+live,
-        # restructured via the latest-per-id join, which reorders things).
-        # Using position here previously showed one location's rating
-        # alongside a COMPLETELY DIFFERENT location's SHAP explanation.
         pos = shap_id_to_pos.get(str(selected_fww_id))
         row = match.iloc[0]
         status = row["predicted_status"]
