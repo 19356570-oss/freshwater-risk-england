@@ -236,7 +236,10 @@ searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
 st.sidebar.markdown("---")
-max_points = 50000
+# Fixed cap on rendered points for map performance - previously a user
+# slider, removed for a simpler sidebar. 1500 keeps load time fast while
+# still showing a representative spread across England.
+max_points = 1500
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### What am I looking at?")
@@ -314,6 +317,13 @@ with map_col:
         shown = filtered.sample(max_points, random_state=42) if len(filtered) > max_points else filtered
         shown = shown.reset_index(drop=True)
 
+        # Map view is a FIXED default - not tied to selection at all.
+        # Earlier versions re-centred and/or re-zoomed on every click,
+        # which felt "flaky": Streamlit rebuilds the whole figure on
+        # every interaction, so any camera change causes a visible jump
+        # even when the underlying data hasn't moved. Now selecting a
+        # point only adds a highlight marker - the view itself never
+        # moves on its own, only in response to the user's own pan/zoom.
         map_center = {"lat": 52.8, "lon": -1.6}
         map_zoom = 5
         searched_row = None
@@ -322,8 +332,6 @@ with map_col:
             match_for_map = preds[preds["fww_id"] == selected_fww_id]
             if not match_for_map.empty:
                 searched_row = match_for_map.iloc[0]
-                map_center = {"lat": searched_row["lat"], "lon": searched_row["lon"]}
-                map_zoom = 11  # close enough to clearly distinguish the single point
                 # NOTE: deliberately not adding this point to `shown` - see
                 # comment above. It's drawn via the highlight overlay only.
 
@@ -717,44 +725,6 @@ with e2:
         """)
 
 st.markdown("---")
-
-with st.expander("🔧 System status (data pipeline monitoring)"):
-    st.caption(
-        "Read-only view of the automated data pipeline. Use the separate "
-        "admin tool (pipeline_admin.py) to control the scheduler."
-    )
-    try:
-        log_df = pd.read_sql("""
-            SELECT source, status, records_fetched, records_new, run_at
-            FROM ingestion_log
-            ORDER BY run_at DESC
-            LIMIT 15
-        """, get_conn())
-
-        if not log_df.empty:
-            def status_icon(s):
-                if s == "success":
-                    return "✅"
-                elif s == "no_new_data":
-                    return "⏸️"
-                elif s == "failed":
-                    return "❌"
-                return "⚠️"
-
-            log_df["  "] = log_df["status"].apply(status_icon)
-            log_df = log_df[["  ", "source", "status", "records_fetched", "records_new", "run_at"]]
-            log_df.columns = ["", "Job", "Status", "Records Checked", "New Records", "Run At"]
-
-            st.dataframe(log_df, hide_index=True, use_container_width=True)
-
-            last_poopy = log_df[log_df["Job"].str.contains("edm_live", na=False)]
-            if not last_poopy.empty:
-                last_time = last_poopy.iloc[0]["Run At"]
-                st.caption(f"Last live sewage data pull: {last_time}")
-        else:
-            st.caption("No pipeline runs logged yet.")
-    except Exception as e:
-        st.caption(f"Could not load pipeline status: {e}")
 
 st.caption(
     "Created as part of an MSc Data Science and Artificial Intelligence dissertation "
