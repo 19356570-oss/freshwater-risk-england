@@ -300,7 +300,22 @@ if selection:
 
 with map_col:
     st.markdown("### Explore the map")
-    st.caption("Click any dot to find out why that stretch of water got its rating.")
+    st.caption(
+        "Scroll or pinch to zoom, drag to pan - or use the buttons below. "
+        "Click any dot to find out why that stretch of water got its rating."
+    )
+
+    zc1, zc2, zc3, _ = st.columns([1, 1, 1, 5])
+    with zc1:
+        if st.button("➕", help="Zoom in", use_container_width=True):
+            st.session_state["map_zoom"] = min(st.session_state.get("map_zoom", 5) + 1, 15)
+    with zc2:
+        if st.button("➖", help="Zoom out", use_container_width=True):
+            st.session_state["map_zoom"] = max(st.session_state.get("map_zoom", 5) - 1, 3)
+    with zc3:
+        if st.button("⟲", help="Reset view", use_container_width=True):
+            st.session_state["map_zoom"] = 5
+            st.session_state["map_center"] = {"lat": 52.8, "lon": -1.6}
 
     if filtered.empty:
         st.warning(
@@ -317,15 +332,26 @@ with map_col:
         shown = filtered.sample(max_points, random_state=42) if len(filtered) > max_points else filtered
         shown = shown.reset_index(drop=True)
 
-        # Map view is a FIXED default - not tied to selection at all.
-        # Earlier versions re-centred and/or re-zoomed on every click,
-        # which felt "flaky": Streamlit rebuilds the whole figure on
-        # every interaction, so any camera change causes a visible jump
-        # even when the underlying data hasn't moved. Now selecting a
-        # point only adds a highlight marker - the view itself never
-        # moves on its own, only in response to the user's own pan/zoom.
-        map_center = {"lat": 52.8, "lon": -1.6}
-        map_zoom = 5
+        # Zoom/center are read from session_state, which persists across
+        # EVERY rerun regardless of what triggered it - a button press or
+        # clicking a data point. This is what keeps the +/- buttons'
+        # effect stable when you then click a point to see its details.
+        #
+        # Native mouse scroll/pinch zoom also works on the map itself -
+        # Plotly does not disable it. The one open limitation: if you
+        # zoom with the mouse specifically (not the buttons) and then
+        # click a point, that mouse-set zoom is not currently captured
+        # back into session_state, so it may reset to whatever the
+        # buttons/session_state last held. Using the buttons guarantees
+        # persistence; mouse zoom works but isn't yet round-tripped the
+        # same way.
+        if "map_center" not in st.session_state:
+            st.session_state["map_center"] = {"lat": 52.8, "lon": -1.6}
+        if "map_zoom" not in st.session_state:
+            st.session_state["map_zoom"] = 5
+
+        map_center = st.session_state["map_center"]
+        map_zoom = st.session_state["map_zoom"]
         searched_row = None
 
         if selected_fww_id is not None:
