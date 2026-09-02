@@ -374,6 +374,17 @@ with map_col:
 
         fig.update_layout(
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
+            # This is the real fix for the map "flickering"/resetting on
+            # every click. Streamlit reruns the whole script on any
+            # interaction, rebuilding this figure from scratch each time -
+            # normally that means the browser is told to reset to the
+            # hardcoded zoom/center above, wiping out whatever the user
+            # had manually panned/zoomed to. uirevision tells Plotly's
+            # browser widget: if a new figure arrives but this value is
+            # unchanged, keep the user's current view exactly as it is,
+            # ignore the figure's own zoom/center. Must stay the same
+            # constant across every rerun for this to work.
+            uirevision="freshwater-risk-map",
             # Legend colours are pinned explicitly rather than left to
             # inherit Streamlit's theme. In dark mode, Streamlit passes
             # Plotly a dark template whose default text is white - but
