@@ -239,7 +239,7 @@ st.sidebar.markdown("---")
 # Fixed cap on rendered points for map performance - previously a user
 # slider, removed for a simpler sidebar. 1500 keeps load time fast while
 # still showing a representative spread across England.
-max_points = 1500
+max_points = len(preds)  # no cap - show every real location, not a sample
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### What am I looking at?")
@@ -385,6 +385,11 @@ with map_col:
             # ignore the figure's own zoom/center. Must stay the same
             # constant across every rerun for this to work.
             uirevision="freshwater-risk-map",
+            # For scatter_map's newer MapLibre-based "map" trace type, the
+            # top-level uirevision above does not always cascade down to
+            # the map's own viewport state reliably. Setting it explicitly
+            # here as well is the more robust fix for that trace type.
+            map={"uirevision": "freshwater-risk-map"},
             # Legend colours are pinned explicitly rather than left to
             # inherit Streamlit's theme. In dark mode, Streamlit passes
             # Plotly a dark template whose default text is white - but
