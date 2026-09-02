@@ -299,21 +299,13 @@ if selection:
         selected_fww_id = selection[1]
 
 with map_col:
-    st.markdown("### Explore the map")
-    st.caption(
-        "Scroll or pinch to zoom, drag to pan - or use the buttons below. "
-        "Click any dot to find out why that stretch of water got its rating."
-    )
-
-    zc1, zc2, zc3, _ = st.columns([1, 1, 1, 5])
-    with zc1:
-        if st.button("➕", help="Zoom in", use_container_width=True):
-            st.session_state["map_zoom"] = min(st.session_state.get("map_zoom", 5) + 1, 15)
-    with zc2:
-        if st.button("➖", help="Zoom out", use_container_width=True):
-            st.session_state["map_zoom"] = max(st.session_state.get("map_zoom", 5) - 1, 3)
-    with zc3:
-        if st.button("⟲", help="Reset view", use_container_width=True):
+    header_col, reset_col = st.columns([5, 1])
+    with header_col:
+        st.markdown("### Explore the map")
+        st.caption("Scroll or pinch to zoom, drag to pan. Click any dot to find out why that stretch of water got its rating.")
+    with reset_col:
+        st.write("")  # small vertical spacer to align button with the heading
+        if st.button("⟲ Reset", help="Return to the default view of England", use_container_width=True):
             st.session_state["map_zoom"] = 5
             st.session_state["map_center"] = {"lat": 52.8, "lon": -1.6}
 
@@ -453,6 +445,16 @@ with map_col:
         click_result = st.plotly_chart(
             fig, use_container_width=True, key="riskmap",
             on_select="rerun", selection_mode="points",
+            config={
+                "displayModeBar": True,      # shows Plotly's own toolbar
+                "displaylogo": False,        # hides the Plotly logo button
+                "modeBarButtonsToRemove": [
+                    "select2d", "lasso2d",   # not useful for this map
+                ],
+                # zoom in/out, pan, and a "reset view" home icon are all
+                # included in the toolbar by default - genuinely inside
+                # the map itself, top-right corner
+            },
         )
 
         click_points = (click_result or {}).get("selection", {}).get("points", [])
