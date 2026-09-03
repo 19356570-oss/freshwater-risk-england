@@ -1,10 +1,12 @@
 """
-dashboard.py
-Public-facing dashboard - Freshwater Ecological Risk, England.
-COMP7039 MSc Dissertation
+dashboard.py - the public-facing RiverWatch dashboard.
 
-Written for non-specialist users: plain language, no ML jargon.
-Run:  streamlit run src/dashboard.py
+Shows predicted ecological health for rivers across England, written as part of
+the COMP7039 MSc dissertation at Oxford Brookes. Everything here is aimed at
+people who aren't water-quality experts - plain English, no machine-learning
+jargon.
+
+To run it:  streamlit run src/dashboard.py
 """
 
 import streamlit as st
@@ -19,7 +21,7 @@ from db_loader import get_conn
 
 
 st.set_page_config(
-    page_title="Is My River Healthy? | England Freshwater Risk",
+    page_title="RiverWatch | England Freshwater Risk",
     page_icon="🌊",
     layout="wide",
 )
@@ -57,7 +59,7 @@ def describe_lc_factor(feat_name, value):
     parts = feat_name.split("_")
     kind = LC_KIND_NAMES.get(parts[1], parts[1])
     radius = parts[-1]
-    if value < 0.5:  # rounds to 0% anyway - "No x" reads more naturally than "0% x"
+    if value < 0.5:  # anything below 0.5% rounds to zero, so "No woodland" reads better than "0% woodland"
         return f"No {kind} within {radius}"
     return f"{value:.0f}% {kind} within {radius}"
 
@@ -73,7 +75,7 @@ def describe_level(feat_name, value, percentiles_df):
     return "a typical level"
 
 
-@st.cache_data(ttl=300)  # refresh from DB every 5 minutes, not just on restart
+@st.cache_data(ttl=300)  # pull fresh data from the database every 5 minutes
 def load_all_data():
     conn = get_conn()
     preds = pd.read_sql("""
@@ -116,7 +118,7 @@ def load_all_data():
     return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos
 
 
-@st.cache_data(ttl=3600)  # percentiles change rarely - hourly is enough
+@st.cache_data(ttl=3600)  # percentiles barely move, so checking once an hour is plenty
 def load_feature_percentiles():
     conn = get_conn()
     fm = pd.read_sql("SELECT * FROM feat_matrix", conn)
@@ -158,7 +160,12 @@ site_counts = preds["site_name"].value_counts()
 GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
 
 def clean_site_name(name, county=None):
-    """Return a user-friendly name, falling back to county for generic/placeholder names."""
+    """Turn raw database site names into something readable.
+
+    Some sites have placeholder names like "other" or "n/a". When that
+    happens we fall back to the county name so the user still sees something
+    meaningful on the map and in the search box.
+    """
     if isinstance(name, str) and name.strip().lower() in GENERIC_SITE_NAMES:
         if pd.notna(county) and county:
             return f"Unnamed site, {county}"
@@ -184,9 +191,9 @@ site_lookup = site_lookup.rename(columns={"display_name": "display"})
 display_to_fww_id = dict(zip(site_lookup["display"], site_lookup["fww_id"]))
 all_site_names = sorted(site_lookup["display"].tolist())
 
-# If a map click just took over the selection, clear the search box before
-# it gets created this run - Streamlit does not allow changing a widget's
-# state after it has already been instantiated, so this must happen first.
+# If a map click just took over the selection, we need to clear the search
+# box. Streamlit won't let you change a widget's state after it's already
+# been drawn, so this has to happen before the search box is created below.
 if st.session_state.pop("_clear_search_flag", False):
     st.session_state["site_search"] = []
 
@@ -202,9 +209,6 @@ searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
 st.sidebar.markdown("---")
-max_points = len(preds)
-
-st.sidebar.markdown("---")
 st.sidebar.markdown("### What am I looking at?")
 st.sidebar.markdown(
     "Each dot is a place where volunteers have tested river water quality. "
@@ -218,12 +222,21 @@ st.sidebar.caption(
 )
 
 
-st.title("How healthy are England's rivers?")
 st.markdown(
-    "This map shows the predicted health of rivers and streams across England. "
-    "We combine water test results from volunteers, records of sewage discharges, "
-    "and information about the surrounding land to estimate how each stretch of "
-    "water is doing - and importantly, **why**."
+    "<div style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
+    "padding: 28px 32px; border-radius: 10px; margin-bottom: 8px;'>"
+    "<h1 style='color: white; font-size: 28px; margin: 0 0 8px 0;'>"
+    "🌊 How healthy are England's rivers?"
+    "</h1>"
+    "<p style='color: rgba(255,255,255,0.9); font-size: 16px; margin: 0; line-height: 1.5;'>"
+    "Welcome to <strong>RiverWatch</strong> - an AI-powered tool that predicts the health "
+    "of rivers and streams across England. We combine water test results from "
+    "volunteers, records of sewage discharges, and information about the surrounding "
+    "land to estimate how each stretch of water is doing - and importantly, "
+    "<strong>why</strong>."
+    "</p>"
+    "</div>",
+    unsafe_allow_html=True,
 )
 
 filtered = preds[preds["predicted_status"].isin(status_filter)]
@@ -250,9 +263,9 @@ st.markdown("---")
 
 map_col, detail_col = st.columns([3, 2])
 
-# Step 1: apply a fresh search pick immediately (no click involved yet).
-# Search ALWAYS re-centres the map on the found point, regardless of
-# whether the user had manually zoomed in beforehand.
+# If the user just picked something from the search box, make it the active
+# selection right away. Searching always jumps the map to that spot, even
+# if the user had already zoomed in somewhere else.
 if searched_fww_id is not None and searched_fww_id != st.session_state.get("_last_shown_search_id"):
     st.session_state["_active_selection"] = ("search", searched_fww_id)
     st.session_state["_last_shown_search_id"] = searched_fww_id
@@ -275,31 +288,31 @@ with map_col:
             "Try ticking a different rating in the sidebar."
         )
     else:
-        shown = filtered.sample(max_points, random_state=42) if len(filtered) > max_points else filtered
-        shown = shown.reset_index(drop=True)
+        shown = filtered.reset_index(drop=True)
 
-        # --- Map view state -------------------------------------------------
-        # The map's center/zoom are persisted in session_state so that a
-        # script rerun (which Streamlit does on every interaction) does NOT
-        # wipe out the view the user has manually panned/zoomed to.
+        # --- Keeping the map where the user left it -------------------------
         #
-        # uirevision is the key: when the figure is rebuilt on a rerun,
-        # Plotly compares the new uirevision to the previous one. If they
-        # match, it keeps the user's current pan/zoom and ignores the
-        # figure's own center/zoom. If they differ, it applies the figure's
-        # center/zoom (i.e. it re-centres on the selected point).
+        # Streamlit reruns the whole script on every interaction, which
+        # normally resets the map to its default view. We don't want that -
+        # if the user has panned or zoomed, they expect it to stay put.
         #
-        # Behaviour the user wants:
-        #   - Search bar  → ALWAYS zoom to the found point.
-        #   - Map click   → zoom to the point ONLY if the map is still at
-        #                   its default home view; if the user has already
-        #                   zoomed in (manually or via a previous select),
-        #                   just highlight the point without moving.
+        # The trick is Plotly's "uirevision". When the map is rebuilt on a
+        # rerun, Plotly checks whether the uirevision value has changed. If
+        # it's the same as last time, Plotly keeps the user's current
+        # pan/zoom and ignores whatever centre/zoom we set. If it's
+        # different, Plotly applies our new centre/zoom instead.
         #
-        # We track "at home" ourselves because Streamlit's on_select only
-        # reports point clicks, not pan/zoom relayout events, so we cannot
-        # read the live viewport from the browser. After any recenter the
-        # map is considered "zoomed in"; a Reset button restores home.
+        # What we want to happen:
+        #   - Searching for a place → always fly to that spot on the map.
+        #   - Clicking a dot        → only fly there if the map is still at
+        #                            its default England-wide view. If the
+        #                            user has already zoomed in, just
+        #                            highlight the dot without moving.
+        #
+        # We can't ask Plotly where the user has panned to (Streamlit only
+        # tells us about dot clicks, not pan/zoom events), so we keep track
+        # of whether we're still "at home" ourselves. After any recenter
+        # we mark the map as zoomed in; the Reset button sets it back home.
         DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
         DEFAULT_ZOOM = 5
 
@@ -321,9 +334,10 @@ with map_col:
             if not match_for_map.empty:
                 searched_row = match_for_map.iloc[0]
 
-        # Decide whether to re-centre this run.
-        # Search always re-centres. A click only re-centres if the map is
-        # still at its home view. Sidebar-only reruns never re-centre.
+        # Work out whether we need to move the map this time round.
+        # Searching always re-centres. A click only re-centres if the map
+        # hasn't been moved from its default view yet. Sidebar tweaks
+        # (like ticking a rating) never re-centre.
         should_recenter = False
         if force_recenter and searched_row is not None:
             if recenter_source == "search":
@@ -357,9 +371,10 @@ with map_col:
         )
         fig.update_traces(marker={"size": 7, "opacity": 0.8})
 
-        # Highlight traces are ALWAYS added, every render - just empty
-        # when nothing is selected. Keeping the trace count fixed across
-        # all states is what lets uirevision preserve the user's pan/zoom.
+        # We always add the highlight traces, even when nothing is selected
+        # (they're just empty in that case). Keeping the number of traces
+        # the same every time is what makes uirevision hold on to the
+        # user's pan/zoom position.
         if searched_row is not None:
             halo_lat, halo_lon = [searched_row["lat"]], [searched_row["lon"]]
             dot_colour = COLOURS.get(searched_row["predicted_status"], "#888")
@@ -402,7 +417,7 @@ with map_col:
 
         st.caption(f"Showing {len(shown):,} of {len(filtered):,} places tested.")
 
-        # Let the user return to the full-country home view after zooming in.
+        # Give the user a way back to the full England view once they've zoomed in.
         if not st.session_state["_map_at_home"]:
             if st.button("Reset map view", help="Return to the full England view"):
                 st.session_state["_map_center"] = DEFAULT_CENTER
@@ -429,12 +444,12 @@ with map_col:
             if clicked_fww_id is not None:
                 click_key = f"click:{clicked_fww_id}"
                 if click_key != st.session_state.get("_last_shown_click"):
-                    # A genuinely new click just happened. The map figure
-                    # above was already built and sent to the browser BEFORE
-                    # we could know about this click, so its centre/zoom/
-                    # highlight cannot reflect it - only a fresh run, starting
-                    # from scratch with this selection already known, can draw
-                    # the map correctly centred on it.
+                    # This is a brand-new click. The problem is that the map
+                    # above was already drawn and sent to the browser before
+                    # we knew about it, so it can't show the highlight or be
+                    # centred on the right place. The only way to fix that is
+                    # to rerun the whole script with this selection already
+                    # set, so the map gets drawn correctly from the start.
                     st.session_state["_active_selection"] = ("click_id", clicked_fww_id)
                     st.session_state["_last_shown_click"] = click_key
                     st.session_state["_last_shown_search_id"] = None
@@ -586,7 +601,7 @@ with detail_col:
                 "the strongest few."
             )
             st.warning(
-                "**Reading these carefully.** These show statistical patterns the "
+                "**Read these carefully.** These show statistical patterns the "
                 "system found, not proven cause and effect. Sewage monitors are "
                 "mostly installed in towns and cities, so raw spill numbers alone "
                 "can be misleading - we correct for this by looking at spills per "
@@ -628,6 +643,39 @@ else:
 
 
 st.markdown("---")
+st.markdown("### What can I do?")
+st.markdown(
+    "If you're concerned about river pollution, here are some ways to get involved:"
+)
+
+action_cols = st.columns(3)
+with action_cols[0]:
+    st.markdown("""
+    **Join the volunteer network**
+
+    [FreshWater Watch](https://freshwaterwatch.org/) trains people across the UK to
+    test their local rivers. No experience needed - you'll get a free kit and simple
+    instructions.
+    """)
+with action_cols[1]:
+    st.markdown("""
+    **Report pollution**
+
+    If you see pollution in a river, report it to the
+    [Environment Agency](https://www.gov.uk/report-an-environmental-incident)
+    or call **0800 80 70 60**. For sewage spills specifically,
+    [Surfers Against Sewage](https://www.sas.org.uk/) runs a pollution alert map.
+    """)
+with action_cols[2]:
+    st.markdown("""
+    **Find your local river group**
+
+    [The Rivers Trust](https://www.theriverstrust.org/) connects local river and
+    catchment groups across England. Many run clean-up days, monitoring programmes,
+    and campaigns you can join.
+    """)
+
+st.markdown("---")
 e1, e2 = st.columns(2)
 
 with e1:
@@ -652,19 +700,22 @@ with e1:
 
         **Water tests by volunteers** - thousands of people across England test their
         local rivers for nitrate and phosphate, two chemicals that indicate pollution
-        from farming and sewage. This comes from the FreshWater Watch project.
+        from farming and sewage. This comes from the
+        [FreshWater Watch project](https://freshwaterwatch.org/).
 
         **Sewage discharge records** - water companies must record every time they
         release untreated sewage into rivers. We use these records to know how much
         sewage pressure each stretch of water is under.
 
-        **Official water quality assessments** - the Environment Agency's formal
-        ratings, which we use to teach the system what healthy and unhealthy water
-        looks like.
+        **Official water quality assessments** - the
+        [Environment Agency's](https://www.gov.uk/government/organisations/environment-agency)
+        formal ratings, which we use to teach the system what healthy and unhealthy
+        water looks like.
 
         **Land maps** - what the land around each river looks like: farmland, towns,
-        woodland or wetland. This matters because rainwater carries pollution off
-        farmland and streets into rivers.
+        woodland or wetland. This comes from the
+        [UK Centre for Ecology & Hydrology](https://www.ceh.ac.uk/). This matters
+        because rainwater carries pollution off farmland and streets into rivers.
         """)
 
     with st.expander("What do the factors mean?"):
@@ -693,7 +744,7 @@ with e1:
 
         We describe each value as "high", "low", or "typical" by comparing
         it to all the other places we have data for - so "high" means
-        higher than most other UK rivers we have tested, not a fixed
+        higher than most other English rivers we have tested, not a fixed
         official threshold.
         """)
 
