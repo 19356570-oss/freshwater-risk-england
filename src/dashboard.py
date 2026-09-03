@@ -782,6 +782,8 @@ st.markdown("---")
 
 st.caption(
     "Created as part of an MSc Data Science and Artificial Intelligence dissertation "
-    "at Oxford Brookes University. Uses public data from the Environment Agency, "
-    "FreshWater Watch (Earthwatch), and the UK Centre for Ecology and Hydrology."
+    "at Oxford Brookes University. Uses public data from the "
+    "[Environment Agency](https://www.gov.uk/government/organisations/environment-agency), "
+    "[FreshWater Watch / Earthwatch](https://freshwaterwatch.org/), and the "
+    "[UK Centre for Ecology & Hydrology](https://www.ceh.ac.uk/)."
 )
