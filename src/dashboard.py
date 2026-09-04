@@ -522,6 +522,8 @@ with map_col:
         )
 
         fig.update_layout(
+            autosize=True,
+            width=None,
             margin={"r": 0, "t": 0, "l": 0, "b": 0},
             uirevision=uirevision,
             map={"uirevision": uirevision},
