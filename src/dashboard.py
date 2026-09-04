@@ -59,6 +59,51 @@ st.markdown("""
         font-size: 14px;
     }
 }
+/* Hover tooltip for tour mode */
+.rw-tour {
+    position: relative;
+    display: inline-block;
+    margin-left: 6px;
+    color: #4A8CB5;
+    cursor: help;
+    font-size: 0.8em;
+    vertical-align: super;
+}
+.rw-tour .rw-tour-tip {
+    visibility: hidden;
+    width: 280px;
+    background-color: #1a3a4a;
+    color: white;
+    text-align: left;
+    border-radius: 8px;
+    padding: 12px 16px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 140%;
+    left: 50%;
+    margin-left: -140px;
+    opacity: 0;
+    transition: opacity 0.25s;
+    font-size: 13px;
+    line-height: 1.5;
+    font-weight: normal;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    pointer-events: none;
+}
+.rw-tour .rw-tour-tip::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -6px;
+    border-width: 6px;
+    border-style: solid;
+    border-color: #1a3a4a transparent transparent transparent;
+}
+.rw-tour:hover .rw-tour-tip {
+    visibility: visible;
+    opacity: 1;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -178,10 +223,10 @@ st.sidebar.markdown("# 🌊 RiverWatch")
 st.sidebar.caption("England Freshwater Risk Dashboard")
 st.sidebar.markdown("---")
 
-st.sidebar.markdown("### Demo mode")
-demo_mode = st.sidebar.toggle("Presentation tour", value=False, help="Turn on to show guided talking points and quick-jump buttons for your demo")
-if demo_mode:
-    st.sidebar.caption("Guided tour is on. Talking points and quick-jump buttons will appear next to each section.")
+st.sidebar.markdown("### Info tour")
+tour_enabled = st.sidebar.toggle("Show info tips", value=False, help="Turn on to see helpful tips when you hover over the info icons next to each section")
+if tour_enabled:
+    st.sidebar.caption("Info tips are on. Hover over the \u2139\ufe0f icons to learn about each section.")
 st.sidebar.markdown("---")
 
 st.sidebar.markdown("### Show me")
@@ -250,28 +295,6 @@ search_pick = st.sidebar.multiselect(
 searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
-if demo_mode:
-    st.sidebar.markdown("### Quick jump (demo)")
-    st.sidebar.caption("Click a button to fly the map to an interesting example site.")
-
-    for demo_status, demo_label, demo_emoji in [
-        ("Poor", "A polluted site", "🔴"),
-        ("Moderate", "A moderate site", "🟠"),
-        ("Good", "A healthy site", "🟢"),
-    ]:
-        status_sites = preds[preds["predicted_status"] == demo_status]
-        if status_sites.empty:
-            continue
-        if st.sidebar.button(f"{demo_emoji} {demo_label}", key=f"demo_jump_{demo_status}", use_container_width=True):
-            sample = status_sites.iloc[0]
-            st.session_state["_active_selection"] = ("search", sample["fww_id"])
-            st.session_state["_last_shown_search_id"] = sample["fww_id"]
-            st.session_state["_force_recenter"] = True
-            st.session_state["_recenter_source"] = "search"
-            st.rerun()
-
-    st.sidebar.markdown("---")
-
 st.sidebar.markdown("### What am I looking at?")
 st.sidebar.markdown(
     "Each dot is a place where volunteers have tested river water quality. "
@@ -285,14 +308,15 @@ st.sidebar.caption(
 )
 
 
-if demo_mode:
-    st.info(
-        "**Presentation tour is on.** "
-        "Talking points appear in blue boxes next to each section. "
-        "Use the quick-jump buttons in the sidebar to fly to interesting locations. "
-        "Turn it off when you're done.",
-        icon="🎤",
-    )
+tour_hero = (
+    "No English river reached Good ecological status in the latest 2022 assessment. "
+    "This tool predicts health for places between official assessments, and explains "
+    "why each place gets its rating."
+)
+tour_hero_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_hero}</span></span>"
+) if tour_enabled else ""
 
 st.markdown(
     "<div class='riverwatch-hero' style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
@@ -311,19 +335,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if demo_mode:
-    st.info(
-        "**Talking point:** Start by explaining the problem - no English river reached "
-        "Good ecological status in the latest assessment. This tool predicts health "
-        "for places between official assessments, and explains why each place gets its rating.",
-        icon="🎤",
-    )
-
 filtered = preds[preds["predicted_status"].isin(status_filter)]
 
 n_good = (preds["predicted_status"] == "Good").sum()
 n_mod  = (preds["predicted_status"] == "Moderate").sum()
 n_poor = (preds["predicted_status"] == "Poor").sum()
+
+tour_stats = (
+    "Over 36,000 volunteer-tested sites. Most fall into Moderate or Poor, "
+    "with very few or none in Good. This mirrors the official Environment Agency finding."
+)
+tour_stats_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_stats}</span></span>"
+) if tour_enabled else ""
 
 m1, m2 = st.columns(2)
 m3, m4 = st.columns(2)
@@ -332,14 +357,6 @@ m2.metric("Healthy (Good)", f"{n_good:,}")
 m3.metric("Under pressure (Moderate)", f"{n_mod:,}")
 m4.metric("Polluted (Poor)", f"{n_poor:,}")
 
-if demo_mode:
-    st.info(
-        "**Talking point:** Over 36,000 volunteer-tested sites. Point out the "
-        "breakdown - most sites fall into Moderate or Poor, with very few or none "
-        "in Good. This mirrors the official Environment Agency finding.",
-        icon="🎤",
-    )
-
 if n_good == 0:
     st.info(
         "**None of England's rivers currently reach 'Good' health.** "
@@ -347,12 +364,6 @@ if n_good == 0:
         "assessment, where no English river waterbody achieved Good ecological status "
         "in the most recent 2022 assessment."
     )
-    if demo_mode:
-        st.info(
-            "**Talking point:** This is a striking statistic worth pausing on. "
-            "It's not a data error - it matches the official 2022 assessment.",
-            icon="🎤",
-        )
 
 st.markdown("---")
 
@@ -373,17 +384,19 @@ if selection:
     if selection[0] in ("search", "click_id"):
         selected_fww_id = selection[1]
 
-with map_col:
-    st.markdown("### Explore the map")
-    st.caption("Click any dot to find out why that stretch of water got its rating.")
+tour_map = (
+    "Each dot is a volunteer-tested site. The colour shows predicted health - "
+    "green is Good, amber is Moderate, red is Poor. Click a dot to see the "
+    "explanation panel on the right."
+)
+tour_map_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_map}</span></span>"
+) if tour_enabled else ""
 
-    if demo_mode:
-        st.info(
-            "**Talking point:** Each dot is a volunteer-tested site. The colour shows "
-            "predicted health - green is Good, amber is Moderate, red is Poor. "
-            "Click a dot to see the explanation panel on the right.",
-            icon="🎤",
-        )
+with map_col:
+    st.markdown(f"### Explore the map{tour_map_icon}")
+    st.caption("Click any dot to find out why that stretch of water got its rating.")
 
     if filtered.empty:
         st.warning(
@@ -561,16 +574,18 @@ with map_col:
                     st.session_state["_recenter_source"] = "click"
                     st.rerun()
 
-with detail_col:
-    st.markdown("### About this place")
+tour_detail = (
+    "When you click a dot, this panel shows the predicted rating, how confident "
+    "we are, and which factors pushed the rating up or down. Red circles mean "
+    "factors pushing toward Poor, blue toward Good."
+)
+tour_detail_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_detail}</span></span>"
+) if tour_enabled else ""
 
-    if demo_mode:
-        st.info(
-            "**Talking point:** When you click a dot, this panel shows the predicted "
-            "rating, how confident we are, and which factors pushed the rating up or down. "
-            "Red circles mean factors pushing toward Poor, blue toward Good.",
-            icon="🎤",
-        )
+with detail_col:
+    st.markdown(f"### About this place{tour_detail_icon}")
 
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
@@ -725,20 +740,22 @@ with detail_col:
         st.info("👈 Click a dot on the map, or search for a place, to see what's affecting that stretch of water.")
 
 
+tour_global = (
+    "This chart shows which factors matter most across all of England. "
+    "Sewage spills and nitrate levels tend to be the biggest drivers. "
+    "This is global importance - the same factors shown per-site on the right panel."
+)
+tour_global_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_global}</span></span>"
+) if tour_enabled else ""
+
 st.markdown("---")
-st.markdown("### What affects river health most across England?")
+st.markdown(f"### What affects river health most across England?{tour_global_icon}")
 st.caption(
     "Across all 36,000+ places we looked at, these are the factors that most "
     "influence whether water is healthy or polluted. Longer bars mean more influence."
 )
-
-if demo_mode:
-    st.info(
-        "**Talking point:** This chart shows which factors matter most across all "
-        "of England. Sewage spills and nitrate levels tend to be the biggest drivers. "
-        "This is global importance - the same factors shown per-site on the right panel.",
-        icon="🎤",
-    )
 
 if global_imp:
     display_names = {}
@@ -761,18 +778,20 @@ else:
     st.caption("Run shap_analysis.py to generate this chart.")
 
 
+tour_action = (
+    "These are concrete actions people can take - joining FreshWater Watch, "
+    "reporting pollution, or finding a local river group."
+)
+tour_action_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_action}</span></span>"
+) if tour_enabled else ""
+
 st.markdown("---")
-st.markdown("### What can I do?")
+st.markdown(f"### What can I do?{tour_action_icon}")
 st.markdown(
     "If you're concerned about river pollution, here are some ways to get involved:"
 )
-
-if demo_mode:
-    st.info(
-        "**Talking point:** End the demo here. These are concrete actions people can take - "
-        "joining FreshWater Watch, reporting pollution, or finding a local river group.",
-        icon="🎤",
-    )
 
 action_cols = st.columns(3, gap="small")
 with action_cols[0]:
