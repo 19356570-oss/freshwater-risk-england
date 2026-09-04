@@ -395,7 +395,11 @@ tour_map_icon = (
 ) if tour_enabled else ""
 
 with map_col:
-    st.markdown(f"### Explore the map{tour_map_icon}")
+    st.markdown(
+    f"<h3>Explore the map{tour_map_icon}</h3>",
+    unsafe_allow_html=True,
+)
+
     st.caption("Click any dot to find out why that stretch of water got its rating.")
 
     if filtered.empty:
