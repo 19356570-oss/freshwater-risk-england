@@ -589,7 +589,7 @@ tour_detail_icon = (
 ) if tour_enabled else ""
 
 with detail_col:
-    st.markdown(f"### About this place{tour_detail_icon}")
+    st.markdown(f"<h3> About this place{tour_detail_icon}</h3>", unsafe_allow_html=True)
 
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
@@ -755,7 +755,7 @@ tour_global_icon = (
 ) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(f"### What affects river health most across England?{tour_global_icon}")
+st.markdown(f"<h3> What affects river health most across England?{tour_global_icon}</h3>", unsafe_allow_html=True)
 st.caption(
     "Across all 36,000+ places we looked at, these are the factors that most "
     "influence whether water is healthy or polluted. Longer bars mean more influence."
