@@ -592,6 +592,8 @@ def render_map():
                     # IMPORTANT:
                     # Do NOT call st.rerun() here
 
+# render the map on first load, and whenever the user changes the filter or
+render_map()
 
 tour_detail = (
     "When you click a dot, this panel shows the predicted rating, how confident "
