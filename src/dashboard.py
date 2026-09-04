@@ -395,11 +395,14 @@ tour_map_icon = (
     f"{tour_map}</span></span>"
 ) if tour_enabled else ""
 
-with map_col:
-    st.markdown(
-    f"<h3>Explore the map{tour_map_icon}</h3>",
-    unsafe_allow_html=True,
-)
+@st.fragment
+def render_map():
+    with map_col:
+        st.markdown(
+            f"<h3>Explore the map{tour_map_icon}</h3>",
+            unsafe_allow_html=True,
+        )
+
 
     st.caption("Click any dot to find out why that stretch of water got its rating.")
 
@@ -486,7 +489,7 @@ with map_col:
             hover_data={"predicted_status": True, "lat": False, "lon": False},
             zoom=map_zoom, center=map_center,
             height=520,
-            map_style="carto-voyager",
+            map_style="carto-positron",
             category_orders={"predicted_status": ["Good", "Moderate", "Poor"]},
             labels={"predicted_status": "Water health"},
         )
@@ -548,36 +551,49 @@ with map_col:
                 st.rerun()
 
         click_result = st.plotly_chart(
-            fig, use_container_width=True, key="riskmap",
-            on_select="rerun", selection_mode="points",
+            fig,
+            use_container_width=True,
+            key="riskmap",
+            on_select="rerun",
+            selection_mode="points",
         )
 
         click_points = (click_result or {}).get("selection", {}).get("points", [])
+
         if click_points:
             pt = click_points[0]
-            click_lat, click_lon = pt.get("lat"), pt.get("lon")
+            click_lat = pt.get("lat")
+            click_lon = pt.get("lon")
+
             clicked_fww_id = None
+
             if click_lat is not None and click_lon is not None:
-                dist = ((shown["lat"] - click_lat) ** 2 + (shown["lon"] - click_lon) ** 2)
+                dist = (
+                    (shown["lat"] - click_lat) ** 2
+                    + (shown["lon"] - click_lon) ** 2
+                )
                 nearest_idx = dist.idxmin()
                 clicked_fww_id = shown.loc[nearest_idx, "fww_id"]
 
             if clicked_fww_id is not None:
                 click_key = f"click:{clicked_fww_id}"
+
                 if click_key != st.session_state.get("_last_shown_click"):
-                    # This is a brand-new click. The problem is that the map
-                    # above was already drawn and sent to the browser before
-                    # we knew about it, so it can't show the highlight or be
-                    # centred on the right place. The only way to fix that is
-                    # to rerun the whole script with this selection already
-                    # set, so the map gets drawn correctly from the start.
-                    st.session_state["_active_selection"] = ("click_id", clicked_fww_id)
+                    st.session_state["_active_selection"] = (
+                        "click_id",
+                        clicked_fww_id,
+                    )
                     st.session_state["_last_shown_click"] = click_key
                     st.session_state["_last_shown_search_id"] = None
                     st.session_state["_clear_search_flag"] = True
                     st.session_state["_force_recenter"] = True
                     st.session_state["_recenter_source"] = "click"
-                    st.rerun()
+
+                    # IMPORTANT:
+                    # Do NOT call st.rerun() here
+
+# render the map on first load, and whenever the user changes the filter or
+render_map()
 
 tour_detail = (
     "When you click a dot, this panel shows the predicted rating, how confident "
