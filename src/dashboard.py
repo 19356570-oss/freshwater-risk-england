@@ -808,9 +808,8 @@ if global_imp:
     .properties(
         height=420,
     )
-)
-
-st.altair_chart(chart, use_container_width=True)
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 else:
     st.caption("Run shap_analysis.py to generate this chart.")
