@@ -10,6 +10,7 @@ To run it:  streamlit run src/dashboard.py
 """
 
 import streamlit as st
+import altair as alt
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -777,7 +778,40 @@ if global_imp:
         "Influence": list(display_names.values()),
     }).sort_values("Influence", ascending=True)
 
-    st.bar_chart(imp_df.set_index("Factor"), horizontal=True, height=340, color="#4A7C8C")
+    chart = (
+    alt.Chart(imp_df)
+    .mark_bar(color="#4A7C8C")
+    .encode(
+        y=alt.Y(
+            "Factor:N",
+            sort="-x",
+            title=None,
+            axis=alt.Axis(
+                labelFontSize=13,
+                labelLimit=300,
+                labelPadding=8,
+            ),
+        ),
+        x=alt.X(
+            "Influence:Q",
+            title="Influence",
+            axis=alt.Axis(
+                labelFontSize=12,
+                titleFontSize=13,
+            ),
+        ),
+        tooltip=[
+            alt.Tooltip("Factor:N", title="Factor"),
+            alt.Tooltip("Influence:Q", title="Influence", format=".3f"),
+        ],
+    )
+    .properties(
+        height=420,
+    )
+)
+
+st.altair_chart(chart, use_container_width=True)
+
 else:
     st.caption("Run shap_analysis.py to generate this chart.")
 
@@ -792,7 +826,7 @@ tour_action_icon = (
 ) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(f"### What can I do?{tour_action_icon}")
+st.markdown(f"<h3>What can I do?{tour_action_icon}</h3>", unsafe_allow_html=True)
 st.markdown(
     "If you're concerned about river pollution, here are some ways to get involved:"
 )
