@@ -550,7 +550,7 @@ def render_map():
                 st.session_state["_map_uirevision"] = "freshwater-risk-map-home"
                 st.rerun()
 
-                click_result = st.plotly_chart(
+        click_result = st.plotly_chart(
             fig,
             use_container_width=True,
             key="riskmap",
