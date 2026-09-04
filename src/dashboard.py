@@ -486,7 +486,7 @@ with map_col:
             hover_data={"predicted_status": True, "lat": False, "lon": False},
             zoom=map_zoom, center=map_center,
             height=520,
-            map_style="carto-positron",
+            map_style="carto-voyager",
             category_orders={"predicted_status": ["Good", "Moderate", "Poor"]},
             labels={"predicted_status": "Water health"},
         )
