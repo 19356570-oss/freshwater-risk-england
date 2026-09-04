@@ -26,6 +26,42 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown("""
+<style>
+/* Make all Streamlit column rows stack vertically on narrow screens */
+@media (max-width: 768px) {
+    .stHorizontalBlock {
+        flex-direction: column !important;
+    }
+    .stHorizontalBlock > div {
+        width: 100% !important;
+    }
+    /* Shrink the hero banner padding and font for phones */
+    .riverwatch-hero {
+        padding: 16px 18px !important;
+    }
+    .riverwatch-hero h1 {
+        font-size: 22px !important;
+    }
+    .riverwatch-hero p {
+        font-size: 14px !important;
+    }
+    /* Give the map a bit less height on phones */
+    .stPlotlyChart {
+        max-height: 400px;
+    }
+    /* Metric cards: reduce padding so they don't waste space */
+    .stMetric {
+        padding: 4px 0 !important;
+    }
+    /* Make sidebar text slightly smaller to fit more */
+    .stSidebar .stMarkdown {
+        font-size: 14px;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 COL_GOOD     = "#2E7D32"
 COL_MODERATE = "#E8A33D"
 COL_POOR     = "#B33A3A"
@@ -142,6 +178,12 @@ st.sidebar.markdown("# 🌊 RiverWatch")
 st.sidebar.caption("England Freshwater Risk Dashboard")
 st.sidebar.markdown("---")
 
+st.sidebar.markdown("### Demo mode")
+demo_mode = st.sidebar.toggle("Presentation tour", value=False, help="Turn on to show guided talking points and quick-jump buttons for your demo")
+if demo_mode:
+    st.sidebar.caption("Guided tour is on. Talking points and quick-jump buttons will appear next to each section.")
+st.sidebar.markdown("---")
+
 st.sidebar.markdown("### Show me")
 
 status_filter = st.sidebar.multiselect(
@@ -208,7 +250,28 @@ search_pick = st.sidebar.multiselect(
 searched_fww_id = display_to_fww_id.get(search_pick[0]) if search_pick else None
 st.sidebar.caption("Start typing a river or site name - matching places appear as you type.")
 
-st.sidebar.markdown("---")
+if demo_mode:
+    st.sidebar.markdown("### Quick jump (demo)")
+    st.sidebar.caption("Click a button to fly the map to an interesting example site.")
+
+    for demo_status, demo_label, demo_emoji in [
+        ("Poor", "A polluted site", "🔴"),
+        ("Moderate", "A moderate site", "🟠"),
+        ("Good", "A healthy site", "🟢"),
+    ]:
+        status_sites = preds[preds["predicted_status"] == demo_status]
+        if status_sites.empty:
+            continue
+        if st.sidebar.button(f"{demo_emoji} {demo_label}", key=f"demo_jump_{demo_status}", use_container_width=True):
+            sample = status_sites.iloc[0]
+            st.session_state["_active_selection"] = ("search", sample["fww_id"])
+            st.session_state["_last_shown_search_id"] = sample["fww_id"]
+            st.session_state["_force_recenter"] = True
+            st.session_state["_recenter_source"] = "search"
+            st.rerun()
+
+    st.sidebar.markdown("---")
+
 st.sidebar.markdown("### What am I looking at?")
 st.sidebar.markdown(
     "Each dot is a place where volunteers have tested river water quality. "
@@ -222,8 +285,17 @@ st.sidebar.caption(
 )
 
 
+if demo_mode:
+    st.info(
+        "**Presentation tour is on.** "
+        "Talking points appear in blue boxes next to each section. "
+        "Use the quick-jump buttons in the sidebar to fly to interesting locations. "
+        "Turn it off when you're done.",
+        icon="🎤",
+    )
+
 st.markdown(
-    "<div style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
+    "<div class='riverwatch-hero' style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
     "padding: 28px 32px; border-radius: 10px; margin-bottom: 8px;'>"
     "<h1 style='color: white; font-size: 28px; margin: 0 0 8px 0;'>"
     "🌊 How healthy are England's rivers?"
@@ -239,17 +311,34 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if demo_mode:
+    st.info(
+        "**Talking point:** Start by explaining the problem - no English river reached "
+        "Good ecological status in the latest assessment. This tool predicts health "
+        "for places between official assessments, and explains why each place gets its rating.",
+        icon="🎤",
+    )
+
 filtered = preds[preds["predicted_status"].isin(status_filter)]
 
 n_good = (preds["predicted_status"] == "Good").sum()
 n_mod  = (preds["predicted_status"] == "Moderate").sum()
 n_poor = (preds["predicted_status"] == "Poor").sum()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Places tested", f"{len(preds):,}")
-c2.metric("Healthy (Good)", f"{n_good:,}")
-c3.metric("Under pressure (Moderate)", f"{n_mod:,}")
-c4.metric("Polluted (Poor)", f"{n_poor:,}")
+m1, m2 = st.columns(2)
+m3, m4 = st.columns(2)
+m1.metric("Places tested", f"{len(preds):,}")
+m2.metric("Healthy (Good)", f"{n_good:,}")
+m3.metric("Under pressure (Moderate)", f"{n_mod:,}")
+m4.metric("Polluted (Poor)", f"{n_poor:,}")
+
+if demo_mode:
+    st.info(
+        "**Talking point:** Over 36,000 volunteer-tested sites. Point out the "
+        "breakdown - most sites fall into Moderate or Poor, with very few or none "
+        "in Good. This mirrors the official Environment Agency finding.",
+        icon="🎤",
+    )
 
 if n_good == 0:
     st.info(
@@ -258,10 +347,16 @@ if n_good == 0:
         "assessment, where no English river waterbody achieved Good ecological status "
         "in the most recent 2022 assessment."
     )
+    if demo_mode:
+        st.info(
+            "**Talking point:** This is a striking statistic worth pausing on. "
+            "It's not a data error - it matches the official 2022 assessment.",
+            icon="🎤",
+        )
 
 st.markdown("---")
 
-map_col, detail_col = st.columns([3, 2])
+map_col, detail_col = st.columns([3, 2], gap="small")
 
 # If the user just picked something from the search box, make it the active
 # selection right away. Searching always jumps the map to that spot, even
@@ -281,6 +376,14 @@ if selection:
 with map_col:
     st.markdown("### Explore the map")
     st.caption("Click any dot to find out why that stretch of water got its rating.")
+
+    if demo_mode:
+        st.info(
+            "**Talking point:** Each dot is a volunteer-tested site. The colour shows "
+            "predicted health - green is Good, amber is Moderate, red is Poor. "
+            "Click a dot to see the explanation panel on the right.",
+            icon="🎤",
+        )
 
     if filtered.empty:
         st.warning(
@@ -461,6 +564,14 @@ with map_col:
 with detail_col:
     st.markdown("### About this place")
 
+    if demo_mode:
+        st.info(
+            "**Talking point:** When you click a dot, this panel shows the predicted "
+            "rating, how confident we are, and which factors pushed the rating up or down. "
+            "Red circles mean factors pushing toward Poor, blue toward Good.",
+            icon="🎤",
+        )
+
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
     if not match.empty:
@@ -621,6 +732,14 @@ st.caption(
     "influence whether water is healthy or polluted. Longer bars mean more influence."
 )
 
+if demo_mode:
+    st.info(
+        "**Talking point:** This chart shows which factors matter most across all "
+        "of England. Sewage spills and nitrate levels tend to be the biggest drivers. "
+        "This is global importance - the same factors shown per-site on the right panel.",
+        icon="🎤",
+    )
+
 if global_imp:
     display_names = {}
     for k, v in list(global_imp.items())[:8]:
@@ -648,7 +767,14 @@ st.markdown(
     "If you're concerned about river pollution, here are some ways to get involved:"
 )
 
-action_cols = st.columns(3)
+if demo_mode:
+    st.info(
+        "**Talking point:** End the demo here. These are concrete actions people can take - "
+        "joining FreshWater Watch, reporting pollution, or finding a local river group.",
+        icon="🎤",
+    )
+
+action_cols = st.columns(3, gap="small")
 with action_cols[0]:
     st.markdown("""
     **Join the volunteer network**
@@ -676,7 +802,7 @@ with action_cols[2]:
     """)
 
 st.markdown("---")
-e1, e2 = st.columns(2)
+e1, e2 = st.columns(2, gap="small")
 
 with e1:
     with st.expander("What do the ratings mean?"):
