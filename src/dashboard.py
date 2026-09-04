@@ -350,8 +350,8 @@ tour_stats_icon = (
     f"{tour_stats}</span></span>"
 ) if tour_enabled else ""
 
-m1, m2 = st.columns(2)
-m3, m4 = st.columns(2)
+m1, m2, m3, m4 = st.columns(4, gap="small")
+#m3, m4 = st.columns(2)
 m1.metric("Places tested", f"{len(preds):,}")
 m2.metric("Healthy (Good)", f"{n_good:,}")
 m3.metric("Under pressure (Moderate)", f"{n_mod:,}")
