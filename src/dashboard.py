@@ -394,14 +394,11 @@ tour_map_icon = (
     " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
     f"{tour_map}</span></span>"
 ) if tour_enabled else ""
-
-@st.fragment
-def render_map():
-    with map_col:
-        st.markdown(
-            f"<h3>Explore the map{tour_map_icon}</h3>",
-            unsafe_allow_html=True,
-        )
+with map_col:
+    st.markdown(
+        f"<h3>Explore the map{tour_map_icon}</h3>",
+        unsafe_allow_html=True,
+    )
 
 
     st.caption("Click any dot to find out why that stretch of water got its rating.")
@@ -489,7 +486,7 @@ def render_map():
             hover_data={"predicted_status": True, "lat": False, "lon": False},
             zoom=map_zoom, center=map_center,
             height=520,
-            map_style="carto-positron",
+            map_style="carto-voyager",
             category_orders={"predicted_status": ["Good", "Moderate", "Poor"]},
             labels={"predicted_status": "Water health"},
         )
