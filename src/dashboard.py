@@ -489,7 +489,7 @@ def render_map():
             hover_data={"predicted_status": True, "lat": False, "lon": False},
             zoom=map_zoom, center=map_center,
             height=520,
-            map_style="carto-voyager",
+            map_style="carto-positron",
             category_orders={"predicted_status": ["Good", "Moderate", "Poor"]},
             labels={"predicted_status": "Water health"},
         )
