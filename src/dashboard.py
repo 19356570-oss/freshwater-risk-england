@@ -156,6 +156,41 @@ def describe_level(feat_name, value, percentiles_df):
         return "high compared to other places"
     return "a typical level"
 
+def render_range_bar(value, p25, p75, unit=""):
+    """
+    Returns a small HTML bar showing exactly where this value sits
+    between "low" and "high", with a marker at the actual position.
+    Much clearer at a glance than text alone.
+    """
+    # position the marker on a 0-100 scale, using p25/p75 as the
+    # "typical zone" boundaries (roughly at 25% and 75% along the bar)
+    span = p75 - p25
+    if span <= 0:
+        position = 50  # degenerate case, e.g. p25==p75==0
+    else:
+        # map value onto 0-100, with p25->25 and p75->75
+        position = 25 + ((value - p25) / span) * 50
+    position = max(4, min(96, position))  # keep marker visible inside the bar
+
+    return f"""
+    <div style="margin: 6px 0 14px 0;">
+        <div style="position: relative; height: 8px; border-radius: 4px;
+                    background: linear-gradient(to right,
+                        #E8E8E8 0%, #E8E8E8 25%,
+                        #D4EDF7 25%, #D4EDF7 75%,
+                        #E8E8E8 75%, #E8E8E8 100%);">
+            <div style="position: absolute; left: {position}%; top: -4px;
+                        width: 3px; height: 16px; background: #1A1A1A;
+                        border-radius: 2px;"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between;
+                    font-size: 10px; color: #888; margin-top: 3px;">
+            <span>Low (below {p25:.1f}{unit})</span>
+            <span>Typical</span>
+            <span>High (above {p75:.1f}{unit})</span>
+        </div>
+    </div>
+    """
 
 @st.cache_data(ttl=300)  # pull fresh data from the database every 5 minutes
 def load_all_data():
@@ -719,6 +754,11 @@ with detail_col:
                     f"{icon} **{label}** - {direction_text}  \n{detail}",
                     unsafe_allow_html=True,
                 )
+                if r["feat"] in percentiles.index:
+                    p25 = percentiles.loc[r["feat"], "p25"]
+                    p75 = percentiles.loc[r["feat"], "p75"]
+                    unit = "%" if r["feat"].startswith("lc_") else ""
+                    st.markdown(render_range_bar(r["val"], p25, p75, unit), unsafe_allow_html=True)
 
             pull_poor = local[local["shap"] > 0]["shap"].sum()
             pull_healthy = local[local["shap"] < 0]["shap"].sum()
