@@ -7,6 +7,12 @@ people who aren't water-quality experts - plain English, no machine-learning
 jargon.
 
 To run it:  streamlit run src/dashboard.py
+
+Structure:
+    1. Imports and page setup
+    2. Constants
+    3. Helper functions (all grouped together)
+    4. Main program flow (runs top to bottom on every page load)
 """
 
 import streamlit as st
@@ -15,7 +21,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from pyproj import Transformer
-import json 
+import json
 import os
 from config import RESULTS_DIR
 from db_loader import get_conn
@@ -29,7 +35,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* Make all Streamlit column rows stack vertically on narrow screens */
 @media (max-width: 768px) {
     .stHorizontalBlock {
         flex-direction: column !important;
@@ -37,7 +42,6 @@ st.markdown("""
     .stHorizontalBlock > div {
         width: 100% !important;
     }
-    /* Shrink the hero banner padding and font for phones */
     .riverwatch-hero {
         padding: 16px 18px !important;
     }
@@ -47,20 +51,16 @@ st.markdown("""
     .riverwatch-hero p {
         font-size: 14px !important;
     }
-    /* Give the map a bit less height on phones */
     .stPlotlyChart {
         max-height: 400px;
     }
-    /* Metric cards: reduce padding so they don't waste space */
     .stMetric {
         padding: 4px 0 !important;
     }
-    /* Make sidebar text slightly smaller to fit more */
     .stSidebar .stMarkdown {
         font-size: 14px;
     }
 }
-/* Hover tooltip for tour mode */
 .rw-tour {
     position: relative;
     display: inline-block;
@@ -108,6 +108,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# CONSTANTS
+
 COL_GOOD     = "#2E7D32"
 COL_MODERATE = "#E8A33D"
 COL_POOR     = "#B33A3A"
@@ -136,17 +139,40 @@ LC_KIND_NAMES = {
     "water":    "open water",
 }
 
+GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
+
+DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
+DEFAULT_ZOOM = 5
+
+
+# HELPER FUNCTIONS
+
+def tour_tip(text, enabled):
+    """
+    Returns a small hoverable info icon containing the given tip text, or
+    an empty string if tour mode is switched off. Used next to section
+    headings throughout the page instead of repeating this HTML each time.
+    """
+    if not enabled:
+        return ""
+    return (
+        " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+        f"{text}</span></span>"
+    )
+
 
 def describe_lc_factor(feat_name, value):
+    """Turns a land-cover feature name and value into a plain sentence."""
     parts = feat_name.split("_")
     kind = LC_KIND_NAMES.get(parts[1], parts[1])
     radius = parts[-1]
-    if value < 0.5:  # anything below 0.5% rounds to zero, so "No woodland" reads better than "0% woodland"
+    if value < 0.5:
         return f"No {kind} within {radius}"
     return f"{value:.0f}% {kind} within {radius}"
 
 
 def describe_level(feat_name, value, percentiles_df):
+    """Describes a value as low, typical, or high compared to other locations."""
     if feat_name not in percentiles_df.index:
         return ""
     p25, p75 = percentiles_df.loc[feat_name, "p25"], percentiles_df.loc[feat_name, "p75"]
@@ -155,6 +181,7 @@ def describe_level(feat_name, value, percentiles_df):
     elif value >= p75:
         return "high compared to other places"
     return "a typical level"
+
 
 def is_locally_consistent(feat, value, shap_val, percentiles_df, global_corr):
     """
@@ -167,21 +194,19 @@ def is_locally_consistent(feat, value, shap_val, percentiles_df, global_corr):
     "should" happen, so those are always shown without filtering.
     """
     if feat not in percentiles_df.index or feat not in global_corr:
-        return True  # no basis to judge, so don't hide it
+        return True
 
     p25, p75 = percentiles_df.loc[feat, "p25"], percentiles_df.loc[feat, "p75"]
     corr = global_corr[feat]
 
     if p25 < value < p75:
-        return True  # typical value - no strong expectation either way
+        return True
 
     value_is_high = value >= p75
-    # if corr>0 (higher=Poor): high value should push Poor (positive shap)
-    # if corr<0 (higher=Healthy): high value should push Healthy (negative shap)
     expected_positive_shap = value_is_high if corr > 0 else not value_is_high
-
     actual_positive_shap = shap_val > 0
     return expected_positive_shap == actual_positive_shap
+
 
 def render_range_bar(value, p25, p75, unit=""):
     """
@@ -189,15 +214,12 @@ def render_range_bar(value, p25, p75, unit=""):
     between "low" and "high", with a marker at the actual position.
     Much clearer at a glance than text alone.
     """
-    # position the marker on a 0-100 scale, using p25/p75 as the
-    # "typical zone" boundaries (roughly at 25% and 75% along the bar)
     span = p75 - p25
     if span <= 0:
-        position = 50  # degenerate case, e.g. p25==p75==0
+        position = 50
     else:
-        # map value onto 0-100, with p25->25 and p75->75
         position = 25 + ((value - p25) / span) * 50
-    position = max(4, min(96, position))  # keep marker visible inside the bar
+    position = max(4, min(96, position))
 
     return f"""
     <div style="margin: 6px 0 14px 0;">
@@ -219,8 +241,46 @@ def render_range_bar(value, p25, p75, unit=""):
     </div>
     """
 
-@st.cache_data(ttl=300)  # pull fresh data from the database every 5 minutes
+
+def clean_site_name(name, county=None):
+    """
+    Turn raw database site names into something readable.
+
+    Some sites have placeholder names like "other" or "n/a". When that
+    happens we fall back to the county name so the user still sees
+    something meaningful on the map and in the search box.
+    """
+    if isinstance(name, str) and name.strip().lower() in GENERIC_SITE_NAMES:
+        if pd.notna(county) and county:
+            return f"Unnamed site, {county}"
+        return "Unnamed site"
+    return name
+
+
+def make_display_name(row, site_counts):
+    """
+    Builds the name shown to users for one location - the real site name
+    where it's unique and usable, the county as a fallback for placeholder
+    names, or "name, county" when several locations share the same name.
+    """
+    name = row["site_name"]
+    county = row.get("county")
+    clean_name = clean_site_name(name, county)
+
+    if clean_name != name:
+        return clean_name
+    if site_counts.get(name, 0) <= 1:
+        return name
+    return f"{name}, {county}" if pd.notna(county) and county else name
+
+
+@st.cache_data(ttl=300)
 def load_all_data():
+    """
+    Loads predictions (preferring the latest live prediction over the
+    historical one, where available), plus the SHAP explanation data and
+    the population-level correlation for each feature.
+    """
     conn = get_conn()
     preds = pd.read_sql("""
         SELECT p.fww_id, p.site_name, p.easting, p.northing, p.wb_id,
@@ -264,8 +324,9 @@ def load_all_data():
     return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos, global_correlations
 
 
-@st.cache_data(ttl=3600)  # percentiles barely move, so checking once an hour is plenty
+@st.cache_data(ttl=3600)
 def load_feature_percentiles():
+    """25th/75th percentile of every feature, used to judge low/typical/high."""
     conn = get_conn()
     fm = pd.read_sql("SELECT * FROM feat_matrix", conn)
     conn.close()
@@ -280,16 +341,23 @@ def load_feature_percentiles():
     })
 
 
-preds, shap_vals, shap_feats, global_imp, shap_id_to_pos = load_all_data()
+# MAIN PROGRAM FLOW
+
+preds, shap_vals, shap_feats, global_imp, shap_id_to_pos, GLOBAL_CORRELATIONS = load_all_data()
 percentiles = load_feature_percentiles()
 
+
+# ---- Sidebar ----
 
 st.sidebar.markdown("# 🌊 RiverWatch")
 st.sidebar.caption("England Freshwater Risk Dashboard")
 st.sidebar.markdown("---")
 
 st.sidebar.markdown("### Info tour")
-tour_enabled = st.sidebar.toggle("Show info tips", value=False, help="Turn on to see helpful tips when you hover over the info icons next to each section")
+tour_enabled = st.sidebar.toggle(
+    "Show info tips", value=False,
+    help="Turn on to see helpful tips when you hover over the info icons next to each section"
+)
 if tour_enabled:
     st.sidebar.caption("Info tips are on. Hover over the \u2139\ufe0f icons to learn about each section.")
 st.sidebar.markdown("---")
@@ -308,34 +376,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### Find a place")
 
 site_counts = preds["site_name"].value_counts()
-
-GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
-
-def clean_site_name(name, county=None):
-    """Turn raw database site names into something readable.
-
-    Some sites have placeholder names like "other" or "n/a". When that
-    happens we fall back to the county name so the user still sees something
-    meaningful on the map and in the search box.
-    """
-    if isinstance(name, str) and name.strip().lower() in GENERIC_SITE_NAMES:
-        if pd.notna(county) and county:
-            return f"Unnamed site, {county}"
-        return "Unnamed site"
-    return name
-
-def make_display_name(row):
-    name = row["site_name"]
-    county = row.get("county")
-    clean_name = clean_site_name(name, county)
-
-    if clean_name != name:
-        return clean_name
-    if site_counts.get(name, 0) <= 1:
-        return name
-    return f"{name}, {county}" if pd.notna(county) and county else name
-
-preds["display_name"] = preds.apply(make_display_name, axis=1)
+preds["display_name"] = preds.apply(lambda row: make_display_name(row, site_counts), axis=1)
 
 site_lookup = preds[["fww_id", "display_name"]].drop_duplicates(subset="fww_id")
 site_lookup = site_lookup.rename(columns={"display_name": "display"})
@@ -343,9 +384,6 @@ site_lookup = site_lookup.rename(columns={"display_name": "display"})
 display_to_fww_id = dict(zip(site_lookup["display"], site_lookup["fww_id"]))
 all_site_names = sorted(site_lookup["display"].tolist())
 
-# If a map click just took over the selection, we need to clear the search
-# box. Streamlit won't let you change a widget's state after it's already
-# been drawn, so this has to happen before the search box is created below.
 if st.session_state.pop("_clear_search_flag", False):
     st.session_state["site_search"] = []
 
@@ -373,15 +411,12 @@ st.sidebar.caption(
 )
 
 
+# ---- Hero banner -----
 tour_hero = (
     "No English river reached Good ecological status in the latest 2022 assessment. "
     "This tool predicts health for places between official assessments, and explains "
     "why each place gets its rating."
 )
-tour_hero_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_hero}</span></span>"
-) if tour_enabled else ""
 
 st.markdown(
     "<div class='riverwatch-hero' style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
@@ -400,23 +435,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# ---- Summary metrics ----
+
 filtered = preds[preds["predicted_status"].isin(status_filter)]
 
 n_good = (preds["predicted_status"] == "Good").sum()
 n_mod  = (preds["predicted_status"] == "Moderate").sum()
 n_poor = (preds["predicted_status"] == "Poor").sum()
 
-tour_stats = (
-    "Over 36,000 volunteer-tested sites. Most fall into Moderate or Poor, "
-    "with very few or none in Good. This mirrors the official Environment Agency finding."
-)
-tour_stats_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_stats}</span></span>"
-) if tour_enabled else ""
-
 m1, m2, m3, m4 = st.columns(4, gap="small")
-#m3, m4 = st.columns(2)
 m1.metric("Places tested", f"{len(preds):,}")
 m2.metric("Healthy (Good)", f"{n_good:,}")
 m3.metric("Under pressure (Moderate)", f"{n_mod:,}")
@@ -432,11 +460,11 @@ if n_good == 0:
 
 st.markdown("---")
 
+
+# ---- Map and detail panel ------
+
 map_col, detail_col = st.columns([3, 2], gap="small")
 
-# If the user just picked something from the search box, make it the active
-# selection right away. Searching always jumps the map to that spot, even
-# if the user had already zoomed in somewhere else.
 if searched_fww_id is not None and searched_fww_id != st.session_state.get("_last_shown_search_id"):
     st.session_state["_active_selection"] = ("search", searched_fww_id)
     st.session_state["_last_shown_search_id"] = searched_fww_id
@@ -454,17 +482,12 @@ tour_map = (
     "green is Good, amber is Moderate, red is Poor. Click a dot to see the "
     "explanation panel on the right."
 )
-tour_map_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_map}</span></span>"
-) if tour_enabled else ""
 
 with map_col:
     st.markdown(
-    f"<h3>Explore the map{tour_map_icon}</h3>",
-    unsafe_allow_html=True,
-)
-
+        f"<h3>Explore the map{tour_tip(tour_map, tour_enabled)}</h3>",
+        unsafe_allow_html=True,
+    )
     st.caption("Click any dot to find out why that stretch of water got its rating.")
 
     if filtered.empty:
@@ -474,22 +497,6 @@ with map_col:
         )
     else:
         shown = filtered.reset_index(drop=True)
-
-        # --- Keeping the map where the user left it -------------------------
-        #
-        # Streamlit reruns the whole script on every interaction, which
-        # normally resets the map to its default view. We don't want that -
-        # if the user has panned or zoomed, they expect it to stay put.
-
-        # What we want to happen:
-        #   - Searching for a place → always fly to that spot on the map.
-        #   - Clicking a dot        → only fly there if the map is still at
-        #                            its default England-wide view. If the
-        #                            user has already zoomed in, just
-        #                            highlight the dot without moving.
-
-        DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
-        DEFAULT_ZOOM = 5
 
         if "_map_center" not in st.session_state:
             st.session_state["_map_center"] = DEFAULT_CENTER
@@ -509,8 +516,6 @@ with map_col:
             if not match_for_map.empty:
                 searched_row = match_for_map.iloc[0]
 
-        # Searching always re-centres. A click only re-centres if the map
-        # hasn't been moved from its default view yet. 
         should_recenter = False
         if force_recenter and searched_row is not None:
             if recenter_source == "search":
@@ -519,8 +524,10 @@ with map_col:
                 should_recenter = True
 
         if should_recenter:
-            st.session_state["_map_center"] = {"lat": float(searched_row["lat"]),
-                                               "lon": float(searched_row["lon"])}
+            st.session_state["_map_center"] = {
+                "lat": float(searched_row["lat"]),
+                "lon": float(searched_row["lon"]),
+            }
             st.session_state["_map_zoom"] = 11
             st.session_state["_map_at_home"] = False
             st.session_state["_map_uirevision"] = "freshwater-risk-map-recenter"
@@ -544,10 +551,6 @@ with map_col:
         )
         fig.update_traces(marker={"size": 7, "opacity": 0.8})
 
-        # We always add the highlight traces, even when nothing is selected
-        # (they're just empty in that case). Keeping the number of traces
-        # the same every time is what makes uirevision hold on to the
-        # user's pan/zoom position.
         if searched_row is not None:
             halo_lat, halo_lon = [searched_row["lat"]], [searched_row["lon"]]
             dot_colour = COLOURS.get(searched_row["predicted_status"], "#888")
@@ -590,7 +593,6 @@ with map_col:
 
         st.caption(f"Showing {len(shown):,} of {len(filtered):,} places tested.")
 
-        # Give the user a way back to the full England view once they've zoomed in.
         if not st.session_state["_map_at_home"]:
             if st.button("Reset map view", help="Return to the full England view"):
                 st.session_state["_map_center"] = DEFAULT_CENTER
@@ -617,12 +619,6 @@ with map_col:
             if clicked_fww_id is not None:
                 click_key = f"click:{clicked_fww_id}"
                 if click_key != st.session_state.get("_last_shown_click"):
-                    # This is a brand-new click. The problem is that the map
-                    # above was already drawn and sent to the browser before
-                    # we knew about it, so it can't show the highlight or be
-                    # centred on the right place. The only way to fix that is
-                    # to rerun the whole script with this selection already
-                    # set, so the map gets drawn correctly from the start.
                     st.session_state["_active_selection"] = ("click_id", clicked_fww_id)
                     st.session_state["_last_shown_click"] = click_key
                     st.session_state["_last_shown_search_id"] = None
@@ -636,13 +632,12 @@ tour_detail = (
     "we are, and which factors pushed the rating up or down. Red circles mean "
     "factors pushing toward Poor, blue toward Good."
 )
-tour_detail_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_detail}</span></span>"
-) if tour_enabled else ""
 
 with detail_col:
-    st.markdown(f"<h3> About this place{tour_detail_icon}</h3>", unsafe_allow_html=True)
+    st.markdown(
+        f"<h3> About this place{tour_tip(tour_detail, tour_enabled)}</h3>",
+        unsafe_allow_html=True,
+    )
 
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
@@ -684,13 +679,14 @@ with detail_col:
 
             local = pd.DataFrame({"feat": names, "shap": vals, "val": fvals})
             local["abs"] = local["shap"].abs()
+
             local["locally_consistent"] = local.apply(
                 lambda r: is_locally_consistent(
                     r["feat"], r["val"], r["shap"], percentiles, GLOBAL_CORRELATIONS
                 ), axis=1
             )
             local = local[local["locally_consistent"]]
-            
+
             n_total = len(local)
             n_bad  = int((local["shap"] > 0).sum())
             n_good_n = int((local["shap"] < 0).sum())
@@ -808,18 +804,19 @@ with detail_col:
         st.info("👈 Click a dot on the map, or search for a place, to see what's affecting that stretch of water.")
 
 
+# ---- Global feature importance chart ---
+
 tour_global = (
     "This chart shows which factors matter most across all of England. "
     "Sewage spills and nitrate levels tend to be the biggest drivers. "
     "This is global importance - the same factors shown per-site on the right panel."
 )
-tour_global_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_global}</span></span>"
-) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(f"<h3> What affects river health most across England?{tour_global_icon}</h3>", unsafe_allow_html=True)
+st.markdown(
+    f"<h3> What affects river health most across England?{tour_tip(tour_global, tour_enabled)}</h3>",
+    unsafe_allow_html=True,
+)
 st.caption(
     "Across all 36,000+ places we looked at, these are the factors that most "
     "influence whether water is healthy or polluted. Longer bars mean more influence."
@@ -842,35 +839,26 @@ if global_imp:
     }).sort_values("Influence", ascending=True)
 
     chart = (
-    alt.Chart(imp_df)
-    .mark_bar(color="#4A7C8C")
-    .encode(
-        y=alt.Y(
-            "Factor:N",
-            sort="-x",
-            title=None,
-            axis=alt.Axis(
-                labelFontSize=13,
-                labelLimit=300,
-                labelPadding=8,
+        alt.Chart(imp_df)
+        .mark_bar(color="#4A7C8C")
+        .encode(
+            y=alt.Y(
+                "Factor:N",
+                sort="-x",
+                title=None,
+                axis=alt.Axis(labelFontSize=13, labelLimit=300, labelPadding=8),
             ),
-        ),
-        x=alt.X(
-            "Influence:Q",
-            title="Influence",
-            axis=alt.Axis(
-                labelFontSize=12,
-                titleFontSize=13,
+            x=alt.X(
+                "Influence:Q",
+                title="Influence",
+                axis=alt.Axis(labelFontSize=12, titleFontSize=13),
             ),
-        ),
-        tooltip=[
-            alt.Tooltip("Factor:N", title="Factor"),
-            alt.Tooltip("Influence:Q", title="Influence", format=".3f"),
-        ],
-    )
-    .properties(
-        height=420,
-    )
+            tooltip=[
+                alt.Tooltip("Factor:N", title="Factor"),
+                alt.Tooltip("Influence:Q", title="Influence", format=".3f"),
+            ],
+        )
+        .properties(height=420)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -878,20 +866,19 @@ else:
     st.caption("Run shap_analysis.py to generate this chart.")
 
 
+# ---- Calls to action ----
+
 tour_action = (
     "These are concrete actions people can take - joining FreshWater Watch, "
     "reporting pollution, or finding a local river group."
 )
-tour_action_icon = (
-    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-    f"{tour_action}</span></span>"
-) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(f"<h3>What can I do?{tour_action_icon}</h3>", unsafe_allow_html=True)
 st.markdown(
-    "If you're concerned about river pollution, here are some ways to get involved:"
+    f"<h3>What can I do?{tour_tip(tour_action, tour_enabled)}</h3>",
+    unsafe_allow_html=True,
 )
+st.markdown("If you're concerned about river pollution, here are some ways to get involved:")
 
 action_cols = st.columns(3, gap="small")
 with action_cols[0]:
@@ -919,6 +906,9 @@ with action_cols[2]:
     catchment groups across England. Many run clean-up days, monitoring programmes,
     and campaigns you can join.
     """)
+
+
+# ---- FAQ / methodology expanders -----
 
 st.markdown("---")
 e1, e2 = st.columns(2, gap="small")
@@ -1015,16 +1005,15 @@ with e2:
         about two thirds of the time when tested against official Environment Agency
         assessments.
 
-        It's better at spotting water under moderate pressure than at catching the
-        most polluted stretches, so treat a 'Moderate' rating as a reason to look more
-        closely rather than a clean bill of health.
+        It's better at correctly identifying Moderate-rated rivers than Poor-rated
+        ones, so treat a 'Moderate' rating as a reason to look more closely rather
+        than a clean bill of health.
 
         **This tool does not tell you whether water is safe to swim in, drink, or let
         pets into.** Always check official Environment Agency guidance for that.
         """)
 
 st.markdown("---")
-
 st.caption(
     "Created as part of an MSc Data Science and Artificial Intelligence dissertation "
     "at Oxford Brookes University. Uses public data from the "
