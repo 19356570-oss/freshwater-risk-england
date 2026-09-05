@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from pyproj import Transformer
-import json
+import json 
 import os
 from config import RESULTS_DIR
 from db_loader import get_conn
@@ -156,6 +156,33 @@ def describe_level(feat_name, value, percentiles_df):
         return "high compared to other places"
     return "a typical level"
 
+def is_locally_consistent(feat, value, shap_val, percentiles_df, global_corr):
+    """
+    Checks whether THIS specific factor, at THIS specific location,
+    genuinely agrees with the feature's known population-wide pattern -
+    not just whether the feature is generally trustworthy overall.
+
+    Only judges clearly extreme values (top or bottom quartile) - for
+    typical/middling values, we can't confidently say what direction
+    "should" happen, so those are always shown without filtering.
+    """
+    if feat not in percentiles_df.index or feat not in global_corr:
+        return True  # no basis to judge, so don't hide it
+
+    p25, p75 = percentiles_df.loc[feat, "p25"], percentiles_df.loc[feat, "p75"]
+    corr = global_corr[feat]
+
+    if p25 < value < p75:
+        return True  # typical value - no strong expectation either way
+
+    value_is_high = value >= p75
+    # if corr>0 (higher=Poor): high value should push Poor (positive shap)
+    # if corr<0 (higher=Healthy): high value should push Healthy (negative shap)
+    expected_positive_shap = value_is_high if corr > 0 else not value_is_high
+
+    actual_positive_shap = shap_val > 0
+    return expected_positive_shap == actual_positive_shap
+
 def render_range_bar(value, p25, p75, unit=""):
     """
     Returns a small HTML bar showing exactly where this value sits
@@ -223,6 +250,8 @@ def load_all_data():
         shap_feats = pd.read_csv(os.path.join(RESULTS_DIR, "shap_input_features.csv"))
         with open(os.path.join(RESULTS_DIR, "shap_global_importance.json")) as f:
             global_imp = json.load(f)
+        with open(os.path.join(RESULTS_DIR, "feature_correlations.json")) as f:
+            global_correlations = json.load(f)
 
         conn2 = get_conn()
         fm_ids = pd.read_sql("SELECT fww_id FROM feat_matrix", conn2)["fww_id"]
@@ -230,9 +259,9 @@ def load_all_data():
         shap_id_to_pos = {str(fww_id): i for i, fww_id in enumerate(fm_ids)}
 
     except FileNotFoundError:
-        shap_vals, shap_feats, global_imp, shap_id_to_pos = None, None, {}, {}
+        shap_vals, shap_feats, global_imp, shap_id_to_pos, global_correlations = None, None, {}, {}, {}
 
-    return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos
+    return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos, global_correlations
 
 
 @st.cache_data(ttl=3600)  # percentiles barely move, so checking once an hour is plenty
@@ -451,24 +480,14 @@ with map_col:
         # Streamlit reruns the whole script on every interaction, which
         # normally resets the map to its default view. We don't want that -
         # if the user has panned or zoomed, they expect it to stay put.
-        #
-        # The trick is Plotly's "uirevision". When the map is rebuilt on a
-        # rerun, Plotly checks whether the uirevision value has changed. If
-        # it's the same as last time, Plotly keeps the user's current
-        # pan/zoom and ignores whatever centre/zoom we set. If it's
-        # different, Plotly applies our new centre/zoom instead.
-        #
+
         # What we want to happen:
         #   - Searching for a place → always fly to that spot on the map.
         #   - Clicking a dot        → only fly there if the map is still at
         #                            its default England-wide view. If the
         #                            user has already zoomed in, just
         #                            highlight the dot without moving.
-        #
-        # We can't ask Plotly where the user has panned to (Streamlit only
-        # tells us about dot clicks, not pan/zoom events), so we keep track
-        # of whether we're still "at home" ourselves. After any recenter
-        # we mark the map as zoomed in; the Reset button sets it back home.
+
         DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
         DEFAULT_ZOOM = 5
 
@@ -490,10 +509,8 @@ with map_col:
             if not match_for_map.empty:
                 searched_row = match_for_map.iloc[0]
 
-        # Work out whether we need to move the map this time round.
         # Searching always re-centres. A click only re-centres if the map
-        # hasn't been moved from its default view yet. Sidebar tweaks
-        # (like ticking a rating) never re-centre.
+        # hasn't been moved from its default view yet. 
         should_recenter = False
         if force_recenter and searched_row is not None:
             if recenter_source == "search":
@@ -667,7 +684,13 @@ with detail_col:
 
             local = pd.DataFrame({"feat": names, "shap": vals, "val": fvals})
             local["abs"] = local["shap"].abs()
-
+            local["locally_consistent"] = local.apply(
+                lambda r: is_locally_consistent(
+                    r["feat"], r["val"], r["shap"], percentiles, GLOBAL_CORRELATIONS
+                ), axis=1
+            )
+            local = local[local["locally_consistent"]]
+            
             n_total = len(local)
             n_bad  = int((local["shap"] > 0).sum())
             n_good_n = int((local["shap"] < 0).sum())
