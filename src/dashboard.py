@@ -7,12 +7,6 @@ people who aren't water-quality experts - plain English, no machine-learning
 jargon.
 
 To run it:  streamlit run src/dashboard.py
-
-Structure:
-    1. Imports and page setup
-    2. Constants
-    3. Helper functions (all grouped together)
-    4. Main program flow (runs top to bottom on every page load)
 """
 
 import streamlit as st
@@ -35,6 +29,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* Make all Streamlit column rows stack vertically on narrow screens */
 @media (max-width: 768px) {
     .stHorizontalBlock {
         flex-direction: column !important;
@@ -42,6 +37,7 @@ st.markdown("""
     .stHorizontalBlock > div {
         width: 100% !important;
     }
+    /* Shrink the hero banner padding and font for phones */
     .riverwatch-hero {
         padding: 16px 18px !important;
     }
@@ -51,16 +47,20 @@ st.markdown("""
     .riverwatch-hero p {
         font-size: 14px !important;
     }
+    /* Give the map a bit less height on phones */
     .stPlotlyChart {
         max-height: 400px;
     }
+    /* Metric cards: reduce padding so they don't waste space */
     .stMetric {
         padding: 4px 0 !important;
     }
+    /* Make sidebar text slightly smaller to fit more */
     .stSidebar .stMarkdown {
         font-size: 14px;
     }
 }
+/* Hover tooltip for tour mode */
 .rw-tour {
     position: relative;
     display: inline-block;
@@ -108,9 +108,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
-# CONSTANTS
-
 COL_GOOD     = "#2E7D32"
 COL_MODERATE = "#E8A33D"
 COL_POOR     = "#B33A3A"
@@ -141,38 +138,30 @@ LC_KIND_NAMES = {
 
 GENERIC_SITE_NAMES = {"other", "n/a", "unknown", "unnamed", ""}
 
-DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
-DEFAULT_ZOOM = 5
+# Area of a circle with the given radius - used to convert land cover
+# percentages into actual km² figures, a genuine number rather than a
+# percentage.
+BUFFER_AREA_KM2 = {
+    "1km": 3.14159 * 1**2,
+    "5km": 3.14159 * 5**2,
+}
 
 
+# ============================================================================
 # HELPER FUNCTIONS
-
-def tour_tip(text, enabled):
-    """
-    Returns a small hoverable info icon containing the given tip text, or
-    an empty string if tour mode is switched off. Used next to section
-    headings throughout the page instead of repeating this HTML each time.
-    """
-    if not enabled:
-        return ""
-    return (
-        " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
-        f"{text}</span></span>"
-    )
-
+# ============================================================================
 
 def describe_lc_factor(feat_name, value):
-    """Turns a land-cover feature name and value into a plain sentence."""
     parts = feat_name.split("_")
     kind = LC_KIND_NAMES.get(parts[1], parts[1])
     radius = parts[-1]
+    area_km2 = value / 100 * BUFFER_AREA_KM2.get(radius, 0)
     if value < 0.5:
         return f"No {kind} within {radius}"
-    return f"{value:.0f}% {kind} within {radius}"
+    return f"{area_km2:.1f} km² of {kind} within {radius}"
 
 
 def describe_level(feat_name, value, percentiles_df):
-    """Describes a value as low, typical, or high compared to other locations."""
     if feat_name not in percentiles_df.index:
         return ""
     p25, p75 = percentiles_df.loc[feat_name, "p25"], percentiles_df.loc[feat_name, "p75"]
@@ -183,63 +172,35 @@ def describe_level(feat_name, value, percentiles_df):
     return "a typical level"
 
 
-def is_locally_consistent(feat, value, shap_val, percentiles_df, global_corr):
+def render_location_chart(local_df):
     """
-    Checks whether THIS specific factor, at THIS specific location,
-    genuinely agrees with the feature's known population-wide pattern -
-    not just whether the feature is generally trustworthy overall.
-
-    Only judges clearly extreme values (top or bottom quartile) - for
-    typical/middling values, we can't confidently say what direction
-    "should" happen, so those are always shown without filtering.
+    A bar chart showing every factor's real SHAP value for this specific
+    location - a visual companion to the summary text below, replacing
+    the old per-factor text list.
     """
-    if feat not in percentiles_df.index or feat not in global_corr:
-        return True
+    chart_df = local_df.copy()
+    chart_df["label"] = chart_df.apply(
+        lambda r: describe_lc_factor(r["feat"], r["val"]) if r["feat"].startswith("lc_")
+        else FEATURE_LABELS.get(r["feat"], r["feat"]),
+        axis=1
+    )
+    chart_df["direction"] = chart_df["shap"].apply(lambda v: "Polluted" if v > 0 else "Healthy")
 
-    p25, p75 = percentiles_df.loc[feat, "p25"], percentiles_df.loc[feat, "p75"]
-    corr = global_corr[feat]
-
-    if p25 < value < p75:
-        return True
-
-    value_is_high = value >= p75
-    expected_positive_shap = value_is_high if corr > 0 else not value_is_high
-    actual_positive_shap = shap_val > 0
-    return expected_positive_shap == actual_positive_shap
-
-
-def render_range_bar(value, p25, p75, unit=""):
-    """
-    Returns a small HTML bar showing exactly where this value sits
-    between "low" and "high", with a marker at the actual position.
-    Much clearer at a glance than text alone.
-    """
-    span = p75 - p25
-    if span <= 0:
-        position = 50
-    else:
-        position = 25 + ((value - p25) / span) * 50
-    position = max(4, min(96, position))
-
-    return f"""
-    <div style="margin: 6px 0 14px 0;">
-        <div style="position: relative; height: 8px; border-radius: 4px;
-                    background: linear-gradient(to right,
-                        #E8E8E8 0%, #E8E8E8 25%,
-                        #D4EDF7 25%, #D4EDF7 75%,
-                        #E8E8E8 75%, #E8E8E8 100%);">
-            <div style="position: absolute; left: {position}%; top: -4px;
-                        width: 3px; height: 16px; background: #1A1A1A;
-                        border-radius: 2px;"></div>
-        </div>
-        <div style="display:flex; justify-content:space-between;
-                    font-size: 10px; color: #888; margin-top: 3px;">
-            <span>Low (below {p25:.1f}{unit})</span>
-            <span>Typical</span>
-            <span>High (above {p75:.1f}{unit})</span>
-        </div>
-    </div>
-    """
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("label:N", sort="-x", title=None, axis=alt.Axis(labelFontSize=11, labelLimit=250)),
+            x=alt.X("shap:Q", title="← Healthier          Polluted →",
+                    axis=alt.Axis(labels=False, ticks=False, grid=False)),
+            color=alt.Color("direction:N",
+                             scale=alt.Scale(domain=["Polluted", "Healthy"], range=["#B33A3A", "#2E7D32"]),
+                             legend=alt.Legend(title=None)),
+            tooltip=[alt.Tooltip("label:N", title="Factor"), alt.Tooltip("shap:Q", title="Pull", format="+.3f")],
+        )
+        .properties(height=380)
+    )
+    return chart
 
 
 def clean_site_name(name, county=None):
@@ -258,15 +219,9 @@ def clean_site_name(name, county=None):
 
 
 def make_display_name(row, site_counts):
-    """
-    Builds the name shown to users for one location - the real site name
-    where it's unique and usable, the county as a fallback for placeholder
-    names, or "name, county" when several locations share the same name.
-    """
     name = row["site_name"]
     county = row.get("county")
     clean_name = clean_site_name(name, county)
-
     if clean_name != name:
         return clean_name
     if site_counts.get(name, 0) <= 1:
@@ -274,13 +229,66 @@ def make_display_name(row, site_counts):
     return f"{name}, {county}" if pd.notna(county) and county else name
 
 
-@st.cache_data(ttl=300)
+def get_location_history(site_name, county):
+    """
+    Finds all historical samples at the same physical location (matching
+    site_name and county), ordered by date - lets us show a genuine
+    before/after comparison for one specific place, rather than a
+    potentially misleading national trend across inconsistently-sampled
+    locations.
+    """
+    conn = get_conn()
+    history = pd.read_sql("""
+        SELECT fww_id, sample_date, nitrate_mid, phosphate_mid, wfd_status
+        FROM feat_matrix
+        WHERE site_name = ? AND county = ?
+        ORDER BY sample_date
+    """, conn, params=(site_name, county))
+    conn.close()
+    return history
+
+
+def get_regional_comparison(county):
+    """All real samples in the same county, for a fair local comparison."""
+    conn = get_conn()
+    df = pd.read_sql(
+        "SELECT wfd_status FROM feat_matrix WHERE county = ?",
+        conn, params=(county,)
+    )
+    conn.close()
+    return df
+
+
+def get_county_summary():
+    """% Poor by county, across England, for counties with enough real data."""
+    conn = get_conn()
+    df = pd.read_sql("""
+        SELECT county, wfd_status FROM feat_matrix
+        WHERE county IS NOT NULL AND county != 'Unknown' AND county != ''
+    """, conn)
+    conn.close()
+    grouped = df.groupby("county")
+    summary = grouped["wfd_status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
+    summary.columns = ["county", "pct_poor"]
+    summary["n"] = grouped.size().values
+    return summary[summary["n"] >= 20].sort_values("pct_poor", ascending=False)
+
+
+def get_yearly_trend():
+    """% Poor by year across all samples - see the caveat shown alongside this chart."""
+    conn = get_conn()
+    df = pd.read_sql("SELECT sample_date, wfd_status FROM feat_matrix WHERE sample_date IS NOT NULL", conn)
+    conn.close()
+    df["year"] = pd.to_datetime(df["sample_date"], errors="coerce").dt.year
+    df = df.dropna(subset=["year"])
+    summary = df.groupby("year")["wfd_status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
+    summary.columns = ["year", "pct_poor"]
+    summary["n_samples"] = df.groupby("year").size().values
+    return summary
+
+
+@st.cache_data(ttl=300)  # pull fresh data from the database every 5 minutes
 def load_all_data():
-    """
-    Loads predictions (preferring the latest live prediction over the
-    historical one, where available), plus the SHAP explanation data and
-    the population-level correlation for each feature.
-    """
     conn = get_conn()
     preds = pd.read_sql("""
         SELECT p.fww_id, p.site_name, p.easting, p.northing, p.wb_id,
@@ -310,8 +318,6 @@ def load_all_data():
         shap_feats = pd.read_csv(os.path.join(RESULTS_DIR, "shap_input_features.csv"))
         with open(os.path.join(RESULTS_DIR, "shap_global_importance.json")) as f:
             global_imp = json.load(f)
-        with open(os.path.join(RESULTS_DIR, "feature_correlations.json")) as f:
-            global_correlations = json.load(f)
 
         conn2 = get_conn()
         fm_ids = pd.read_sql("SELECT fww_id FROM feat_matrix", conn2)["fww_id"]
@@ -319,14 +325,13 @@ def load_all_data():
         shap_id_to_pos = {str(fww_id): i for i, fww_id in enumerate(fm_ids)}
 
     except FileNotFoundError:
-        shap_vals, shap_feats, global_imp, shap_id_to_pos, global_correlations = None, None, {}, {}, {}
+        shap_vals, shap_feats, global_imp, shap_id_to_pos = None, None, {}, {}
 
-    return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos, global_correlations
+    return preds, shap_vals, shap_feats, global_imp, shap_id_to_pos
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)  # percentiles barely move, so checking once an hour is plenty
 def load_feature_percentiles():
-    """25th/75th percentile of every feature, used to judge low/typical/high."""
     conn = get_conn()
     fm = pd.read_sql("SELECT * FROM feat_matrix", conn)
     conn.close()
@@ -341,13 +346,15 @@ def load_feature_percentiles():
     })
 
 
+# ============================================================================
 # MAIN PROGRAM FLOW
+# ============================================================================
 
-preds, shap_vals, shap_feats, global_imp, shap_id_to_pos, GLOBAL_CORRELATIONS = load_all_data()
+preds, shap_vals, shap_feats, global_imp, shap_id_to_pos = load_all_data()
 percentiles = load_feature_percentiles()
 
 
-# ---- Sidebar ----
+# ---- Sidebar ----------------------------------------------------------------
 
 st.sidebar.markdown("# 🌊 RiverWatch")
 st.sidebar.caption("England Freshwater Risk Dashboard")
@@ -411,12 +418,17 @@ st.sidebar.caption(
 )
 
 
-# ---- Hero banner -----
+# ---- Hero banner --------------------------------------------------------------
+
 tour_hero = (
     "No English river reached Good ecological status in the latest 2022 assessment. "
     "This tool predicts health for places between official assessments, and explains "
     "why each place gets its rating."
 )
+tour_hero_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_hero}</span></span>"
+) if tour_enabled else ""
 
 st.markdown(
     "<div class='riverwatch-hero' style='background: linear-gradient(135deg, #1a3a4a 0%, #2E7D32 100%); "
@@ -436,7 +448,7 @@ st.markdown(
 )
 
 
-# ---- Summary metrics ----
+# ---- Summary metrics ------------------------------------------------------------
 
 filtered = preds[preds["predicted_status"].isin(status_filter)]
 
@@ -461,7 +473,7 @@ if n_good == 0:
 st.markdown("---")
 
 
-# ---- Map and detail panel ------
+# ---- Map and detail panel -------------------------------------------------------
 
 map_col, detail_col = st.columns([3, 2], gap="small")
 
@@ -482,12 +494,13 @@ tour_map = (
     "green is Good, amber is Moderate, red is Poor. Click a dot to see the "
     "explanation panel on the right."
 )
+tour_map_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_map}</span></span>"
+) if tour_enabled else ""
 
 with map_col:
-    st.markdown(
-        f"<h3>Explore the map{tour_tip(tour_map, tour_enabled)}</h3>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<h3>Explore the map{tour_map_icon}</h3>", unsafe_allow_html=True)
     st.caption("Click any dot to find out why that stretch of water got its rating.")
 
     if filtered.empty:
@@ -497,6 +510,9 @@ with map_col:
         )
     else:
         shown = filtered.reset_index(drop=True)
+
+        DEFAULT_CENTER = {"lat": 52.8, "lon": -1.6}
+        DEFAULT_ZOOM = 5
 
         if "_map_center" not in st.session_state:
             st.session_state["_map_center"] = DEFAULT_CENTER
@@ -542,7 +558,7 @@ with map_col:
             color="predicted_status",
             color_discrete_map=COLOURS,
             hover_name="display_name",
-            hover_data={"predicted_status": True, "lat": False, "lon": False},
+            hover_data={"predicted_status": True, "lat": ":.4f", "lon": ":.4f"},
             zoom=map_zoom, center=map_center,
             height=520,
             map_style="carto-voyager",
@@ -629,15 +645,16 @@ with map_col:
 
 tour_detail = (
     "When you click a dot, this panel shows the predicted rating, how confident "
-    "we are, and which factors pushed the rating up or down. Red circles mean "
-    "factors pushing toward Poor, blue toward Good."
+    "we are, and which factors pushed the rating up or down. Red bars mean "
+    "factors pushing toward Poor, green toward Good."
 )
+tour_detail_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_detail}</span></span>"
+) if tour_enabled else ""
 
 with detail_col:
-    st.markdown(
-        f"<h3> About this place{tour_tip(tour_detail, tour_enabled)}</h3>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<h3> About this place{tour_detail_icon}</h3>", unsafe_allow_html=True)
 
     match = preds[preds["fww_id"] == selected_fww_id] if selected_fww_id is not None else pd.DataFrame()
 
@@ -669,6 +686,28 @@ with detail_col:
             )
         st.caption(conf_text)
 
+        # --- Location history (only shown if this exact place has repeat visits) ---
+        history = get_location_history(row["site_name"], row.get("county"))
+        if len(history) > 1:
+            st.markdown("---")
+            st.markdown("**How has this exact place changed over time?**")
+            st.caption(f"This location has been sampled {len(history)} times by volunteers.")
+
+            history["sample_date"] = pd.to_datetime(history["sample_date"])
+            history_chart = (
+                alt.Chart(history)
+                .transform_fold(["nitrate_mid", "phosphate_mid"], as_=["Chemical", "Level"])
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("sample_date:T", title="Sample date"),
+                    y=alt.Y("Level:Q", title="mg/L measured"),
+                    color=alt.Color("Chemical:N", title=None),
+                    tooltip=["sample_date:T", "Level:Q", "Chemical:N"],
+                )
+                .properties(height=250)
+            )
+            st.altair_chart(history_chart, use_container_width=True)
+
         st.markdown("---")
         st.markdown("**Why did this place get this rating?**")
 
@@ -680,12 +719,8 @@ with detail_col:
             local = pd.DataFrame({"feat": names, "shap": vals, "val": fvals})
             local["abs"] = local["shap"].abs()
 
-            local["locally_consistent"] = local.apply(
-                lambda r: is_locally_consistent(
-                    r["feat"], r["val"], r["shap"], percentiles, GLOBAL_CORRELATIONS
-                ), axis=1
-            )
-            local = local[local["locally_consistent"]]
+            st.altair_chart(render_location_chart(local), use_container_width=True)
+            st.caption("All 17 factors for this location, strongest pull either direction.")
 
             n_total = len(local)
             n_bad  = int((local["shap"] > 0).sum())
@@ -694,101 +729,26 @@ with detail_col:
             if status == "Poor":
                 st.caption(
                     f"**{n_bad} of {n_total}** factors point toward Polluted - "
-                    f"shown below. The remaining {n_total - n_bad} pointed the "
-                    "other way but were outweighed."
+                    f"the remaining {n_total - n_bad} pointed the other way but were outweighed."
                 )
             elif status == "Good":
                 st.caption(
                     f"**{n_good_n} of {n_total}** factors point toward Healthy - "
-                    f"shown below. The remaining {n_total - n_good_n} pointed the "
-                    "other way but were outweighed."
+                    f"the remaining {n_total - n_good_n} pointed the other way but were outweighed."
                 )
             else:
                 st.caption(
                     f"**{n_bad} of {n_total}** factors point toward Polluted, "
-                    f"**{n_good_n} of {n_total}** point toward Healthy - "
-                    "a genuine balance, shown below."
+                    f"**{n_good_n} of {n_total}** point toward Healthy - a genuine balance."
                 )
-
-            show_all = st.checkbox("Show all factors, not just the top ones", key="show_all_shap")
-
-            if show_all:
-                local_display = local.sort_values("abs", ascending=False)
-                st.caption(f"All {n_total} factors, strongest first:")
-            elif status == "Poor":
-                local_display = local[local["shap"] > 0].nlargest(5, "abs")
-                st.caption("The five things that made this place polluted:")
-            elif status == "Good":
-                local_display = local[local["shap"] < 0].nlargest(5, "abs")
-                st.caption("The five things that kept this place healthy:")
-            else:
-                bad  = local[local["shap"] > 0].nlargest(3, "abs")
-                good = local[local["shap"] < 0].nlargest(3, "abs")
-                local_display = pd.concat([bad, good])
-                st.caption(
-                    "This place is a balance of concerning and reassuring "
-                    "factors. Here are the three strongest on each side:"
-                )
-
-            showing_balanced = (not show_all) and status == "Moderate"
-            last_group = None
-
-            for _, r in local_display.iterrows():
-                worsens = r["shap"] > 0
-                icon = "🔴" if worsens else "🔵"
-                direction_text = (
-                    "pushed this rating toward Polluted" if worsens
-                    else "pushed this rating toward Healthy"
-                )
-
-                if showing_balanced:
-                    group = "Concerning factors" if worsens else "Reassuring factors"
-                    if group != last_group:
-                        st.markdown(f"**{group}**")
-                        last_group = group
-
-                if r["feat"].startswith("lc_"):
-                    label = describe_lc_factor(r["feat"], r["val"])
-                    val_str = ""
-                else:
-                    label = FEATURE_LABELS.get(r["feat"], r["feat"])
-                    if r["feat"] in ("nitrate_mid", "phosphate_mid"):
-                        val_str = f"{r['val']:.2f} mg/L measured"
-                    elif r["feat"] == "spills_per_pipe":
-                        val_str = f"{r['val']:,.0f} spills per pipe on average"
-                    else:
-                        val_str = f"{r['val']:,.0f}"
-
-                how_high = describe_level(r["feat"], r["val"], percentiles)
-                how_high_str = f" ({how_high})" if how_high else ""
-
-                if val_str:
-                    detail = f"<span style='color:#666; font-size:13px;'>{val_str}{how_high_str}</span>"
-                elif how_high:
-                    detail = f"<span style='color:#666; font-size:13px;'>{how_high}</span>"
-                else:
-                    detail = ""
-
-                st.markdown(
-                    f"{icon} **{label}** - {direction_text}  \n{detail}",
-                    unsafe_allow_html=True,
-                )
-                if r["feat"] in percentiles.index:
-                    p25 = percentiles.loc[r["feat"], "p25"]
-                    p75 = percentiles.loc[r["feat"], "p75"]
-                    unit = "%" if r["feat"].startswith("lc_") else ""
-                    st.markdown(render_range_bar(r["val"], p25, p75, unit), unsafe_allow_html=True)
 
             pull_poor = local[local["shap"] > 0]["shap"].sum()
             pull_healthy = local[local["shap"] < 0]["shap"].sum()
 
-            st.caption("🔴 pushed toward Polluted · 🔵 pushed toward Healthy")
             st.caption(
                 f"Total pull toward Polluted: {pull_poor:+.3f} · "
-                f"Total pull toward Healthy: {pull_healthy:+.3f} "
-                f"(across all {n_total} factors, not just those shown above). "
-                "The final rating reflects the sum of every factor, not just "
-                "the strongest few."
+                f"Total pull toward Healthy: {pull_healthy:+.3f}. "
+                "The final rating reflects the sum of every factor, not just the strongest few."
             )
             st.warning(
                 "**Read these carefully.** These show statistical patterns the "
@@ -798,25 +758,49 @@ with detail_col:
                 "monitored pipe rather than the total count.",
                 icon="⚠️",
             )
+
+            # --- Regional comparison - genuinely location-specific, so it
+            # lives here in the detail panel, not in the map column. ---
+            county = row.get("county")
+            if county:
+                regional = get_regional_comparison(county)
+                if len(regional) > 5:
+                    st.markdown("---")
+                    st.markdown(f"**How does this compare to other rivers in {county}?**")
+                    pct_poor_here = 100 if status == "Poor" else 0
+                    pct_poor_region = (regional["wfd_status"] == "Poor").mean() * 100
+                    comp_df = pd.DataFrame({
+                        "Location": ["This river", f"{county} average"],
+                        "% rated Poor": [pct_poor_here, pct_poor_region],
+                    })
+                    comp_chart = (
+                        alt.Chart(comp_df)
+                        .mark_bar(color="#B33A3A")
+                        .encode(x="Location:N", y="% rated Poor:Q")
+                        .properties(height=200)
+                    )
+                    st.altair_chart(comp_chart, use_container_width=True)
+                    st.caption(f"Based on {len(regional)} tested locations across {county}.")
         else:
             st.caption("Detailed explanation not available for this location.")
     else:
         st.info("👈 Click a dot on the map, or search for a place, to see what's affecting that stretch of water.")
 
 
-# ---- Global feature importance chart ---
+# ---- Global feature importance chart -----------------------------------------------
 
 tour_global = (
     "This chart shows which factors matter most across all of England. "
     "Sewage spills and nitrate levels tend to be the biggest drivers. "
     "This is global importance - the same factors shown per-site on the right panel."
 )
+tour_global_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_global}</span></span>"
+) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(
-    f"<h3> What affects river health most across England?{tour_tip(tour_global, tour_enabled)}</h3>",
-    unsafe_allow_html=True,
-)
+st.markdown(f"<h3> What affects river health most across England?{tour_global_icon}</h3>", unsafe_allow_html=True)
 st.caption(
     "Across all 36,000+ places we looked at, these are the factors that most "
     "influence whether water is healthy or polluted. Longer bars mean more influence."
@@ -842,17 +826,10 @@ if global_imp:
         alt.Chart(imp_df)
         .mark_bar(color="#4A7C8C")
         .encode(
-            y=alt.Y(
-                "Factor:N",
-                sort="-x",
-                title=None,
-                axis=alt.Axis(labelFontSize=13, labelLimit=300, labelPadding=8),
-            ),
-            x=alt.X(
-                "Influence:Q",
-                title="Influence",
-                axis=alt.Axis(labelFontSize=12, titleFontSize=13),
-            ),
+            y=alt.Y("Factor:N", sort="-x", title=None,
+                    axis=alt.Axis(labelFontSize=13, labelLimit=300, labelPadding=8)),
+            x=alt.X("Influence:Q", title="Influence",
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=13)),
             tooltip=[
                 alt.Tooltip("Factor:N", title="Factor"),
                 alt.Tooltip("Influence:Q", title="Influence", format=".3f"),
@@ -861,23 +838,98 @@ if global_imp:
         .properties(height=420)
     )
     st.altair_chart(chart, use_container_width=True)
-
 else:
     st.caption("Run shap_analysis.py to generate this chart.")
 
 
-# ---- Calls to action ----
+# ---- County comparison chart --------------------------------------------------------
+
+st.markdown("---")
+st.markdown("### Which parts of England are most affected?")
+
+county_summary = get_county_summary()
+top_bottom = pd.concat([county_summary.head(10), county_summary.tail(10)])
+
+st.caption(
+    "Showing the 10 highest and 10 lowest counties by % Poor (out of "
+    f"{len(county_summary)} counties with at least 20 tests) - not every "
+    "English county has enough data to include here."
+)
+
+county_chart = (
+    alt.Chart(top_bottom)
+    .mark_bar()
+    .encode(
+        y=alt.Y("county:N", sort="-x", title=None),
+        x=alt.X("pct_poor:Q", title="% rated Poor"),
+        color=alt.condition(alt.datum.pct_poor > 50, alt.value("#B33A3A"), alt.value("#2E7D32")),
+        tooltip=[
+            alt.Tooltip("county:N", title="County"),
+            alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+            alt.Tooltip("n:Q", title="Number of tests"),
+        ],
+    )
+    .properties(height=500)
+)
+county_text = (
+    alt.Chart(top_bottom)
+    .mark_text(align="left", dx=3)
+    .encode(
+        y=alt.Y("county:N", sort="-x"),
+        x="pct_poor:Q",
+        text=alt.Text("pct_poor:Q", format=".0f"),
+        tooltip=[
+            alt.Tooltip("county:N", title="County"),
+            alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+            alt.Tooltip("n:Q", title="Number of tests"),
+        ],
+    )
+)
+st.altair_chart(county_chart + county_text, use_container_width=True)
+
+
+# ---- Yearly trend ---------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("### Has water quality changed over the years?")
+
+yearly = get_yearly_trend()
+if len(yearly) > 1:
+    yearly_chart = (
+        alt.Chart(yearly)
+        .mark_line(point=True, color="#B33A3A")
+        .encode(
+            x=alt.X("year:O", title="Year"),
+            y=alt.Y("pct_poor:Q", title="% rated Poor"),
+            tooltip=[
+                alt.Tooltip("year:O", title="Year"),
+                alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+                alt.Tooltip("n_samples:Q", title="Number of samples"),
+            ],
+        )
+        .properties(height=250)
+    )
+    st.altair_chart(yearly_chart, use_container_width=True)
+    st.caption(
+        "⚠️ Different locations are sampled by volunteers each year, so this "
+        "partly reflects which places happened to be tested, not a fully "
+        "controlled measurement of real change over time."
+    )
+
+
+# ---- Calls to action ----------------------------------------------------------------
 
 tour_action = (
     "These are concrete actions people can take - joining FreshWater Watch, "
     "reporting pollution, or finding a local river group."
 )
+tour_action_icon = (
+    " <span class='rw-tour'>ℹ️<span class='rw-tour-tip'>"
+    f"{tour_action}</span></span>"
+) if tour_enabled else ""
 
 st.markdown("---")
-st.markdown(
-    f"<h3>What can I do?{tour_tip(tour_action, tour_enabled)}</h3>",
-    unsafe_allow_html=True,
-)
+st.markdown(f"<h3>What can I do?{tour_action_icon}</h3>", unsafe_allow_html=True)
 st.markdown("If you're concerned about river pollution, here are some ways to get involved:")
 
 action_cols = st.columns(3, gap="small")
@@ -908,7 +960,7 @@ with action_cols[2]:
     """)
 
 
-# ---- FAQ / methodology expanders -----
+# ---- FAQ / methodology expanders -----------------------------------------------------
 
 st.markdown("---")
 e1, e2 = st.columns(2, gap="small")
@@ -965,9 +1017,9 @@ with e1:
         water on its own.
 
         **Farmland / Woodland / Grassland / Wetland / Built-up area** -
-        what percentage of the land within 1 km or 5 km is that type.
-        Farmland and built-up areas tend to add pollution pressure; woodland
-        and wetland tend to help filter it out.
+        shown as the actual area (km²) within 1 km or 5 km. Farmland and
+        built-up areas tend to add pollution pressure; woodland and
+        wetland tend to help filter it out.
 
         **Open water within 1 km / 5 km** - how much lake, pond or other
         open water is nearby. This can dilute pollution, so its absence
@@ -976,11 +1028,6 @@ with e1:
         **Nitrate / Phosphate in the water** - chemicals mainly from
         farming and sewage. Higher levels generally mean more pollution
         pressure.
-
-        We describe each value as "high", "low", or "typical" by comparing
-        it to all the other places we have data for - so "high" means
-        higher than most other English rivers we have tested, not a fixed
-        official threshold.
         """)
 
 with e2:
@@ -1005,9 +1052,9 @@ with e2:
         about two thirds of the time when tested against official Environment Agency
         assessments.
 
-        It's better at correctly identifying Moderate-rated rivers than Poor-rated
-        ones, so treat a 'Moderate' rating as a reason to look more closely rather
-        than a clean bill of health.
+        It's better at spotting water under moderate pressure than at catching the
+        most polluted stretches, so treat a 'Moderate' rating as a reason to look more
+        closely rather than a clean bill of health.
 
         **This tool does not tell you whether water is safe to swim in, drink, or let
         pets into.** Always check official Environment Agency guidance for that.
