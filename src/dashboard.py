@@ -21,9 +21,11 @@ from config import RESULTS_DIR
 from db_loader import get_conn
 
 
+ICON_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "riverwatch_icon_256.png")
+
 st.set_page_config(
     page_title="RiverWatch | England Freshwater Risk",
-    page_icon="🌊",
+    page_icon=ICON_PATH if os.path.exists(ICON_PATH) else "🌊",
     layout="wide",
 )
 
@@ -356,7 +358,12 @@ percentiles = load_feature_percentiles()
 
 # ---- Sidebar ----------------------------------------------------------------
 
-st.sidebar.markdown("# 🌊 RiverWatch")
+_logo_col, _name_col = st.sidebar.columns([1, 2.6], gap="small")
+with _logo_col:
+    if os.path.exists(ICON_PATH):
+        st.image(ICON_PATH, width=58)
+with _name_col:
+    st.markdown("### RiverWatch")
 st.sidebar.caption("England Freshwater Risk Dashboard")
 st.sidebar.markdown("---")
 
