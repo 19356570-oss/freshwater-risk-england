@@ -887,12 +887,16 @@ county_chart = (
     .mark_bar()
     .encode(
         y=alt.Y("county:N", sort="-x", title=None),
-        x=alt.X("pct_poor:Q", title="% rated Poor"),
-        color=alt.condition(alt.datum.pct_poor > 50, alt.value("#B33A3A"), alt.value("#2E7D32")),
+        x=alt.X("pct_poor:Q", title="% predicted Poor"),
+        color=alt.Color(
+            "pct_poor:Q",
+            scale=alt.Scale(scheme="redyellowgreen", reverse=True),
+            legend=alt.Legend(title="% predicted Poor"),
+        ),
         tooltip=[
             alt.Tooltip("county:N", title="County"),
             alt.Tooltip("pct_poor:Q", title="% predicted Poor", format=".1f"),
-            alt.Tooltip("n:Q", title="Number of tests"),
+            alt.Tooltip("n:Q", title="Sites predicted"),
         ],
     )
     .properties(height=500)
