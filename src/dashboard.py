@@ -243,7 +243,7 @@ def get_location_history(site_name, county):
     """
     conn = get_conn()
     history = pd.read_sql("""
-        SELECT fww_id, sample_date, nitrate_mid, phosphate_mid, wfd_status
+        SELECT fww_id, sample_date, nitrate_mid, phosphate_mid
         FROM feat_matrix
         WHERE site_name = ? AND county = ?
         ORDER BY sample_date
@@ -253,39 +253,59 @@ def get_location_history(site_name, county):
 
 
 def get_regional_comparison(county):
-    """All real samples in the same county, for a fair local comparison."""
+    """All model predictions in the same county, for a like-for-like comparison."""
     conn = get_conn()
-    df = pd.read_sql(
-        "SELECT wfd_status FROM feat_matrix WHERE county = ?",
-        conn, params=(county,)
-    )
+    df = pd.read_sql("""
+        SELECT p.predicted_status AS status
+        FROM predictions p
+        INNER JOIN (
+            SELECT fww_id, MAX(predicted_at) AS latest
+            FROM predictions GROUP BY fww_id
+        ) l ON p.fww_id = l.fww_id AND p.predicted_at = l.latest
+        INNER JOIN feat_matrix f ON p.fww_id = f.fww_id
+        WHERE f.county = ?
+    """, conn, params=(county,))
     conn.close()
     return df
 
 
 def get_county_summary():
-    """% Poor by county, across England, for counties with enough real data."""
+    """% predicted Poor by county."""
     conn = get_conn()
     df = pd.read_sql("""
-        SELECT county, wfd_status FROM feat_matrix
-        WHERE county IS NOT NULL AND county != 'Unknown' AND county != ''
+        SELECT f.county, p.predicted_status AS status
+        FROM predictions p
+        INNER JOIN (
+            SELECT fww_id, MAX(predicted_at) AS latest
+            FROM predictions GROUP BY fww_id
+        ) l ON p.fww_id = l.fww_id AND p.predicted_at = l.latest
+        INNER JOIN feat_matrix f ON p.fww_id = f.fww_id
+        WHERE f.county IS NOT NULL AND f.county != 'Unknown' AND f.county != ''
     """, conn)
     conn.close()
     grouped = df.groupby("county")
-    summary = grouped["wfd_status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
+    summary = grouped["status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
     summary.columns = ["county", "pct_poor"]
     summary["n"] = grouped.size().values
-    return summary[summary["n"] >= 20].sort_values("pct_poor", ascending=False)
-
+    return summary[summary["n"] >= 30].sort_values("pct_poor", ascending=False)
 
 def get_yearly_trend():
-    """% Poor by year across all samples - see the caveat shown alongside this chart."""
+    """% predicted Poor by sample year."""
     conn = get_conn()
-    df = pd.read_sql("SELECT sample_date, wfd_status FROM feat_matrix WHERE sample_date IS NOT NULL", conn)
+    df = pd.read_sql("""
+        SELECT f.sample_date, p.predicted_status AS status
+        FROM predictions p
+        INNER JOIN (
+            SELECT fww_id, MAX(predicted_at) AS latest
+            FROM predictions GROUP BY fww_id
+        ) l ON p.fww_id = l.fww_id AND p.predicted_at = l.latest
+        INNER JOIN feat_matrix f ON p.fww_id = f.fww_id
+        WHERE f.sample_date IS NOT NULL
+    """, conn)
     conn.close()
     df["year"] = pd.to_datetime(df["sample_date"], errors="coerce").dt.year
     df = df.dropna(subset=["year"])
-    summary = df.groupby("year")["wfd_status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
+    summary = df.groupby("year")["status"].apply(lambda s: (s == "Poor").mean() * 100).reset_index()
     summary.columns = ["year", "pct_poor"]
     summary["n_samples"] = df.groupby("year").size().values
     return summary
@@ -775,7 +795,7 @@ with detail_col:
                     st.markdown("---")
                     st.markdown(f"**How does this compare to other rivers in {county}?**")
                     pct_poor_here = 100 if status == "Poor" else 0
-                    pct_poor_region = (regional["wfd_status"] == "Poor").mean() * 100
+                    pct_poor_region = (regional["status"] == "Poor").mean() * 100
                     comp_df = pd.DataFrame({
                         "Location": ["This river", f"{county} average"],
                         "% rated Poor": [pct_poor_here, pct_poor_region],
@@ -787,7 +807,7 @@ with detail_col:
                         .properties(height=200)
                     )
                     st.altair_chart(comp_chart, use_container_width=True)
-                    st.caption(f"Based on {len(regional)} tested locations across {county}.")
+                    st.caption(f"Based on {len(regional):,} predicted locations across {county}.")
         else:
             st.caption("Detailed explanation not available for this location.")
     else:
@@ -852,15 +872,14 @@ else:
 # ---- County comparison chart --------------------------------------------------------
 
 st.markdown("---")
-st.markdown("### Which parts of England are most affected?")
+st.markdown("### Where are the most locations predicted Poor?")
 
 county_summary = get_county_summary()
 top_bottom = pd.concat([county_summary.head(10), county_summary.tail(10)])
 
 st.caption(
-    "Showing the 10 highest and 10 lowest counties by % Poor (out of "
-    f"{len(county_summary)} counties with at least 20 tests) - not every "
-    "English county has enough data to include here."
+    "Showing the 10 highest and 10 lowest counties by % predicted Poor (out of "
+    f"{len(county_summary)} counties with at least 30 predicted locations)."
 )
 
 county_chart = (
@@ -872,7 +891,7 @@ county_chart = (
         color=alt.condition(alt.datum.pct_poor > 50, alt.value("#B33A3A"), alt.value("#2E7D32")),
         tooltip=[
             alt.Tooltip("county:N", title="County"),
-            alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+            alt.Tooltip("pct_poor:Q", title="% predicted Poor", format=".1f"),
             alt.Tooltip("n:Q", title="Number of tests"),
         ],
     )
@@ -887,7 +906,7 @@ county_text = (
         text=alt.Text("pct_poor:Q", format=".0f"),
         tooltip=[
             alt.Tooltip("county:N", title="County"),
-            alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+            alt.Tooltip("pct_poor:Q", title="% predicted Poor", format=".1f"),
             alt.Tooltip("n:Q", title="Number of tests"),
         ],
     )
@@ -898,7 +917,7 @@ st.altair_chart(county_chart + county_text, use_container_width=True)
 # ---- Yearly trend ---------------------------------------------------------------------
 
 st.markdown("---")
-st.markdown("### Has water quality changed over the years?")
+st.markdown("### How have predicted ratings changed over time?")
 
 yearly = get_yearly_trend()
 if len(yearly) > 1:
@@ -907,10 +926,10 @@ if len(yearly) > 1:
         .mark_line(point=True, color="#B33A3A")
         .encode(
             x=alt.X("year:O", title="Year"),
-            y=alt.Y("pct_poor:Q", title="% rated Poor"),
+            y=alt.Y("pct_poor:Q", title="% predicted Poor"),
             tooltip=[
                 alt.Tooltip("year:O", title="Year"),
-                alt.Tooltip("pct_poor:Q", title="% rated Poor", format=".1f"),
+                alt.Tooltip("pct_poor:Q", title="% predicted Poor", format=".1f"),
                 alt.Tooltip("n_samples:Q", title="Number of samples"),
             ],
         )
