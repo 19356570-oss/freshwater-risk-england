@@ -129,8 +129,28 @@ def train_with_smote(df, feat_cols=ALL_FEATS):
         "label_classes": le.classes_.tolist(),
     }
 
+def get_baseline_f1():
+    """Pooled weighted F1 of the production model, computed from model_metrics."""
+    import sys
+    sys.path.insert(0, "src")
+    from db_loader import get_conn
+    import pandas as pd
 
-def compare_to_baseline(smote_results, baseline_f1=0.6584):
+    conn = get_conn()
+    m = pd.read_sql("""
+        SELECT mod_f1, poor_f1 FROM model_metrics
+        WHERE model_type = 'Random Forest' AND feature_set = 'full_feature_set'
+        LIMIT 1
+    """, conn)
+    counts = pd.read_sql(
+        "SELECT wfd_status, COUNT(*) n FROM feat_matrix GROUP BY wfd_status", conn)
+    conn.close()
+
+    total = counts["n"].sum()
+    w = dict(zip(counts["wfd_status"], counts["n"] / total))
+    return m["mod_f1"][0] * w["Moderate"] + m["poor_f1"][0] * w["Poor"]
+
+def compare_to_baseline(smote_results, baseline_f1=get_baseline_f1()):
     """Compare against your current production model (class_weight='balanced')."""
     print("\n" + "=" * 60)
     print("SMOTE vs CURRENT PRODUCTION MODEL")
